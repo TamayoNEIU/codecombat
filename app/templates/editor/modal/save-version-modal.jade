@@ -12,10 +12,11 @@ block modal-body-content
     form.form-inline
       .form-group.commit-message
         input.form-control#commit-message(name="commitMessage", type="text")
-      if !view.isPatch
-        .checkbox
+      if !view.isPatch && !view.options.noNewMajorVersions
+        // We don't use the major version feature, and it might be buggy, so hide for now.
+        .checkbox.hide
           label
-            input#major-version(name="version-is-major", type="checkbox")
+            input#major-version(name="version-is-major", type="checkbox", disabled=true)
             span(data-i18n="versions.new_major_version") New Major Version
   else
     .alert.alert-danger(data-i18n="delta.no_changes") No changes
@@ -36,6 +37,9 @@ block modal-footer-content
       button.btn.btn-sm#agreement-button(data-i18n="versions.cla_agree") I AGREE
     if view.isPatch
       .alert.alert-info(data-i18n="versions.owner_approve") An owner will need to approve it before your changes will become visible.
+    .save-error-area
+      if view.savingPatchError
+        .alert.alert-danger Unable to save patch: #{view.savingPatchError}
 
   .buttons
     button.btn(data-dismiss="modal", data-i18n="common.cancel") Cancel

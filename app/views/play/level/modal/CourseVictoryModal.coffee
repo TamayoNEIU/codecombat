@@ -1,148 +1,182 @@
+require('app/styles/play/level/modal/course-victory-modal.sass')
 ModalView = require 'views/core/ModalView'
 template = require 'templates/play/level/modal/course-victory-modal'
-Achievements = require 'collections/Achievements'
 Level = require 'models/Level'
-Campaign = require 'models/Campaign'
 Course = require 'models/Course'
-ThangType = require 'models/ThangType'
-ThangTypes = require 'collections/ThangTypes'
+LevelSession = require 'models/LevelSession'
 LevelSessions = require 'collections/LevelSessions'
-EarnedAchievement = require 'models/EarnedAchievement'
-LocalMongo = require 'lib/LocalMongo'
 ProgressView = require './ProgressView'
-NewItemView = require './NewItemView'
+Classroom = require 'models/Classroom'
+utils = require 'core/utils'
+{ findNextLevelsBySession, getNextLevelForLevel } = require 'ozaria/site/common/ozariaUtils'
+api = require('core/api')
+urls = require 'core/urls'
+store = require 'core/store'
+CourseVictoryComponent = require('./CourseVictoryComponent').default
+CourseRewardsView = require './CourseRewardsView'
+Achievements = require 'collections/Achievements'
+LocalMongo = require 'lib/LocalMongo'
 
 module.exports = class CourseVictoryModal extends ModalView
   id: 'course-victory-modal'
   template: template
   closesOnClickOutside: false
 
-  
   initialize: (options) ->
     @courseID = options.courseID
-    @courseInstanceID = options.courseInstanceID
+    @courseInstanceID = options.courseInstanceID or utils.getQueryVariable('course-instance') or utils.getQueryVariable('league')
+    if features.china and not @courseID and not @courseInstanceID   #just for china tarena hackthon 2019 classroom RestPoolLeaf
+      @courseID = '560f1a9f22961295f9427742'
+      @courseInstanceID = '5cb8403a60778e004634ee6e'
     @views = []
 
     @session = options.session
     @level = options.level
-    @newItems = new ThangTypes()
-    @newHeroes = new ThangTypes()
-    
-    @achievements = options.achievements
-    if not @achievements
-      @achievements = new Achievements()
-      @achievements.fetchRelatedToLevel(@session.get('level').original)
-      @achievements = @supermodel.loadCollection(@achievements, 'achievements').model
-      @listenToOnce @achievements, 'sync', @onAchievementsLoaded
-    else
-      @onAchievementsLoaded()
-    
+    @capstoneStage = options.capstoneStage
+
+    if @courseInstanceID
+      @classroom = new Classroom()
+      @supermodel.trackRequest(@classroom.fetchForCourseInstance(@courseInstanceID, {}))
+
     @playSound 'victory'
-    @nextLevel = options.nextLevel
-    if (nextLevel = @level.get('nextLevel')) and not @nextLevel
-      @nextLevel = new Level().setURL "/db/level/#{nextLevel.original}/version/#{nextLevel.majorVersion}"
-      @nextLevel = @supermodel.loadModel(@nextLevel, 'level').model
-      
-    @campaign = new Campaign()
+    @nextLevel = new Level()
+    @nextAssessment = new Level()
+
+    unless utils.ozariaCourseIDs.includes(@courseID)
+      nextLevelPromise = api.levels.fetchNextForCourse({
+        levelOriginalID: @level.get('original')
+        @courseInstanceID
+        @courseID
+        sessionID: @session.id
+      }).then ({ level, assessment }) =>
+        @nextLevel.set(level)
+        @nextAssessment.set(assessment)
+      @supermodel.trackPromise(nextLevelPromise)
+
     @course = options.course
     if @courseID and not @course
       @course = new Course().setURL "/db/course/#{@courseID}"
-      @course = @supermodel.loadModel(@course, 'course').model
-      if @course.loading
-        @listenToOnce @course, 'sync', @onCourseLoaded
-      else
-        @onCourseLoaded()
-    else if @course
-      @onCourseLoaded()
+      @course = @supermodel.loadModel(@course).model
 
     if @courseInstanceID
-      @levelSessions = new LevelSessions()
-      @levelSessions.fetchForCourseInstance(@courseInstanceID)
-      @levelSessions = @supermodel.loadCollection(@levelSessions, 'sessions', { 
-        data: { project: 'state.complete level.original playtime changed' }
-      }).model
+      unless @course
+        @course = new Course()
+        @supermodel.trackRequest @course.fetchForCourseInstance(@courseInstanceID, {})
+      if @level.isProject()
+        @galleryURL = urls.projectGallery({ @courseInstanceID })
 
+    properties = {
+      category: 'Students',
+      levelSlug: @level.get('slug')
+    }
+    concepts = @level.get('goals').filter((g) => g.concepts).map((g) => g.id)
+    if concepts.length
+      goalStates = @session.get('state').goalStates
+      succeededConcepts = concepts.filter((c) => goalStates[c]?.status is 'success')
+      _.assign(properties, {concepts, succeededConcepts})
+    window.tracker?.trackEvent 'Play Level Victory Modal Loaded', properties, []
 
-  onCourseLoaded: ->
-    @campaign.set('_id', @course.get('campaignID'))
-    @campaign = @supermodel.loadModel(@campaign, 'campaign').model
+    if @level.isType('hero', 'course', 'course-ladder', 'game-dev', 'web-dev')
+      @achievements = options.achievements
+      if not @achievements
+        @achievements = new Achievements()
+        @achievements.fetchRelatedToLevel(@session.get('level').original)
+        @achievements = @supermodel.loadCollection(@achievements, 'achievements').model
 
-      
-  onAchievementsLoaded: ->
-    @achievements.models = _.filter @achievements.models, (m) -> not m.get('query')?.ladderAchievementDifficulty  # Don't show higher AI difficulty achievements
-    itemOriginals = []
-    heroOriginals = []
-    achievementIDs = []
-    for achievement in @achievements.models
-      rewards = achievement.get('rewards') or {}
-      heroOriginals.push rewards.heroes or []
-      itemOriginals.push rewards.items or []
-      achievement.completed = LocalMongo.matchesQuery(@session.attributes, achievement.get('query'))
-      achievementIDs.push(achievement.id) if achievement.completed
+  onResourceLoadFailed: (e) ->
+    if e.resource.jqxhr is @nextLevelRequest
+      return
+    super(arguments...)
 
-    itemOriginals = _.uniq _.flatten itemOriginals
-    heroOriginals = _.uniq _.flatten heroOriginals
-    #project = ['original', 'rasterIcon', 'name', 'soundTriggers', 'i18n']  # This is what we need, but the PlayHeroesModal needs more, and so we load more to fill up the supermodel.
-    project = ['original', 'rasterIcon', 'name', 'slug', 'soundTriggers', 'featureImages', 'gems', 'heroClass', 'description', 'components', 'extendedName', 'unlockLevelName', 'i18n']
-    for [newThangTypeCollection, originals] in [[@newItems, itemOriginals], [@newHeroes, heroOriginals]]
-      for original in originals
-        thang= new ThangType()
-        thang.url = "/db/thang.type/#{original}/version"
-        thang.project = project
-        @supermodel.loadModel(thang, 'thang')
-        newThangTypeCollection.add(thang)
-      
-    @newEarnedAchievements = []
-    for achievement in @achievements.models
-      continue unless achievement.completed
-      ea = new EarnedAchievement({
-        collection: achievement.get('collection')
-        triggeredBy: @session.id
-        achievement: achievement.id
-      })
-      ea.save()
-      # Can't just add models to supermodel because each ea has the same url
-      ea.sr = @supermodel.addSomethingResource(ea.cid)
-      @newEarnedAchievements.push ea
-      @listenToOnce ea, 'sync', (model) ->
-        model.sr.markLoaded()
-        if _.all((ea.id for ea in @newEarnedAchievements))
-          unless me.loading
-            @supermodel.loadModel(me, 'user', {cache: false})
-          @newEarnedAchievementsResource.markLoaded()
-
-    
-    # have to use a something resource because addModelResource doesn't handle models being upserted/fetched via POST like we're doing here
-    @newEarnedAchievementsResource = @supermodel.addSomethingResource('earned achievements') if @newEarnedAchievements.length
-
-  
   onLoaded: ->
     super()
+
     @views = []
-    
-    # TODO: Add main victory view
-    # TODO: Add level up view
-    # TODO: Add new hero view?
-    
-    for newItem in @newItems.models
-      @views.push(new NewItemView({item: newItem}))
-    
-    progressView = new ProgressView({
-      level: @level
-      nextLevel: @nextLevel
-      course: @course
-      campaign: @campaign
-      levelSessions: @levelSessions
-    })
-    
-    progressView.once 'done', @onDone, @
-    progressView.once 'next-level', @onNextLevel, @
-    for view in @views
-      view.on 'continue', @onViewContinue, @
-    @views.push(progressView)
-    
-    @showView(_.first(@views))
+
+    if me.showGemsAndXp() and @achievements.length > 0
+      @achievements.models = _.filter @achievements.models, (m) -> not m.get('query')?.ladderAchievementDifficulty  # Don't show higher AI difficulty achievements
+      showAchievements = false  # show achievements only if atleast one achievement is completed
+      for achievement in @achievements.models
+        achievement.completed = LocalMongo.matchesQuery(@session.attributes, achievement.get('query'))
+        if achievement.completed
+          showAchievements = true
+      if showAchievements
+        rewardsView = new CourseRewardsView({level: @level, session: @session, achievements: @achievements, supermodel: @supermodel})
+        rewardsView.on 'continue', @onViewContinue, @
+        @views.push(rewardsView)
+
+    if @courseInstanceID
+      # Defer level sessions fetch to follow supermodel-based loading of other dependent data
+      # Not using supermodel.loadCollection because it can overwrite @session handle via LevelBus async saving
+      # @session will be in the @levelSession collection
+      # CourseRewardsView above requires the most recent 'complete' session to process achievements correctly
+      # TODO: use supermodel.loadCollection for better caching but watch out for @session overwriting
+      @levelSessions = new LevelSessions()
+      @levelSessions.fetchForCourseInstance(@courseInstanceID, {}).then(=> @levelSessionsLoaded())
+    else if utils.ozariaCourseIDs.includes(@courseID)  # if it is ozaria course and there is no course instance, load campaign so that we can calculate next levels
+      api.campaigns.get({campaignHandle: @course?.get('campaignID')}).then (@campaign) =>
+        @levelSessionsLoaded()
+    else
+      @levelSessionsLoaded()
+
+  levelSessionsLoaded: ->
+    # update level sessions so that stats are correct
+    @levelSessions?.remove(@session)
+    @levelSessions?.add(@session)
+
+    # get next level for ozaria course, no nextAssessment for ozaria courses
+    if utils.ozariaCourseIDs.includes(@courseID) 
+      @getNextLevelOzaria().then (level) => 
+        @nextLevel.set(level)
+        @loadViews()
+    else
+      @loadViews()
   
+  loadViews: ->
+    if @level.isLadder() or @level.isProject()
+      @courseID ?= @course.id
+
+      progressView = new ProgressView({
+        level: @level
+        nextLevel: @nextLevel
+        nextAssessment: @nextAssessment
+        course: @course
+        classroom: @classroom
+        levelSessions: @levelSessions
+        session: @session
+        courseInstanceID: @courseInstanceID
+      })
+
+      progressView.once 'done', @onDone, @
+      progressView.once 'next-level', @onNextLevel, @
+      progressView.once 'start-challenge', @onStartChallenge, @
+      progressView.once 'to-map', @onToMap, @
+      progressView.once 'ladder', @onLadder, @
+      progressView.once 'publish', @onPublish, @
+
+      @views.push(progressView)
+
+    if @views.length > 0
+      @showView(_.first(@views))
+    else
+      @showVictoryComponent()
+
+  getNextLevelOzaria: ->
+    if @classroom and @levelSessions # fetch next level based on sessions and classroom levels
+      classroomLevels = @classroom.get('courses')?.find((c) => c._id == @courseID)?.levels
+      nextLevelOriginal = findNextLevelsBySession(@levelSessions.models, classroomLevels)
+    else if @campaign # fetch next based on course's campaign levels (for teachers)
+      currentLevel = @campaign.levels[@level.get('original')]
+      if (currentLevel.isPlayedInStages && @capstoneStage) # @capstoneStage comes from PlayLevelView's query params
+        currentLevelStage = @capstoneStage
+      nextLevelData = getNextLevelForLevel(currentLevel, currentLevelStage) || {}
+      nextLevelOriginal = nextLevelData.original
+      @nextLevelStage = nextLevelData.nextLevelStage
+    if nextLevelOriginal
+      return api.levels.getByOriginal(nextLevelOriginal)
+    else
+      return Promise.resolve({})  # no next level
+
   afterRender: ->
     super()
     @showView(@currentView)
@@ -156,15 +190,86 @@ module.exports = class CourseVictoryModal extends ModalView
     @currentView = view
 
   onViewContinue: ->
-    index = _.indexOf(@views, @currentView)
-    @showView(@views[index+1])
+    if @level.isLadder() or @level.isProject()
+      index = _.indexOf(@views, @currentView)
+      @showView(@views[index+1])
+    else
+      @showVictoryComponent()
+
+  showVictoryComponent: ->
+    propsData = {
+      nextLevel: @nextLevel.toJSON(),
+      nextLevelStage: @nextLevelStage
+      nextAssessment: @nextAssessment.toJSON()
+      level: @level.toJSON(),
+      session: @session.toJSON(),
+      course: @course.toJSON(),
+      @courseInstanceID,
+      stats: @classroom?.statsForSessions(@levelSessions, @course.id)
+      supermodel: @supermodel,
+      parent: @options.parent
+      codeLanguage: @session.get('codeLanguage')
+    }
+    new CourseVictoryComponent({
+      el: @$el.find('.modal-content')[0]
+      propsData,
+      store
+    })
 
   onNextLevel: ->
-    link = "/play/level/#{@nextLevel.get('slug')}?course=#{@courseID}&course-instance=#{@courseInstanceID}"
+    window.tracker?.trackEvent 'Play Level Victory Modal Next Level', category: 'Students', levelSlug: @level.get('slug'), nextLevelSlug: @nextLevel.get('slug'), []
+    if me.isSessionless()
+      link = "/play/level/#{@nextLevel.get('slug')}?course=#{@courseID}&codeLanguage=#{utils.getQueryVariable('codeLanguage', 'python')}"
+    else
+      link = "/play/level/#{@nextLevel.get('slug')}?course=#{@courseID}&course-instance=#{@courseInstanceID}"
+      link += "&codeLanguage=" + @level.get('primerLanguage') if @level.get('primerLanguage')
+    application.router.navigate(link, {trigger: true})
+
+  # TODO: Remove rest of logic transferred to CourseVictoryComponent
+  onToMap: ->
+    if me.isSessionless()
+      link = "/teachers/courses"
+    else
+      link = "/play/#{@course.get('campaignID')}?course-instance=#{@courseInstanceID}"
+    window.tracker?.trackEvent 'Play Level Victory Modal Back to Map', category: 'Students', levelSlug: @level.get('slug'), []
     application.router.navigate(link, {trigger: true})
 
   onDone: ->
-    link = "/courses/#{@courseID}/#{@courseInstanceID}"
+    window.tracker?.trackEvent 'Play Level Victory Modal Done', category: 'Students', levelSlug: @level.get('slug'), []
+    if me.isSessionless()
+      link = '/teachers/courses'
+    else
+      link = '/students'
+    @submitLadder()
     application.router.navigate(link, {trigger: true})
-    
-    
+
+  onPublish: ->
+    window.tracker?.trackEvent 'Play Level Victory Modal Publish', category: 'Students', levelSlug: @level.get('slug'), []
+    if @session.isFake()
+      application.router.navigate(@galleryURL, {trigger: true})
+    else
+      wasAlreadyPublished = @session.get('published')
+      @session.set({ published: true })
+      return @session.save().then =>
+        application.router.navigate(@galleryURL, {trigger: true})
+        text = i18n.t('play_level.project_published_noty')
+        unless wasAlreadyPublished
+          noty({text, layout: 'topCenter', type: 'success', timeout: 5000})
+
+  onLadder: ->
+    # Preserve the supermodel as we navigate back to the ladder.
+    viewArgs = [{supermodel: if @options.hasReceivedMemoryWarning then null else @supermodel}, @level.get('slug')]
+    ladderURL = "/play/ladder/#{@level.get('slug') || @level.id}"
+    if leagueID = (@courseInstanceID or utils.getQueryVariable 'league')
+      leagueType = if @level.get('type') is 'course-ladder' then 'course' else 'clan'
+      viewArgs.push leagueType
+      viewArgs.push leagueID
+      ladderURL += "/#{leagueType}/#{leagueID}"
+    ladderURL += '#my-matches'
+    @submitLadder()
+    Backbone.Mediator.publish 'router:navigate', route: ladderURL, viewClass: 'views/ladder/LadderView', viewArgs: viewArgs
+
+  submitLadder: ->
+    return if application.testing
+    if @level.get('type') is 'course-ladder' and @session.readyToRank() or not @session.inLeague(@courseInstanceID)
+      api.levelSessions.submitToRank({ session: @session.id, courseInstanceId: @courseInstanceID })

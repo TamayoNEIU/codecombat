@@ -1,10 +1,13 @@
+require('app/styles/courses/classroom-view.sass')
 Campaign = require 'models/Campaign'
 CocoCollection = require 'collections/CocoCollection'
 Course = require 'models/Course'
 CourseInstance = require 'models/CourseInstance'
 Classroom = require 'models/Classroom'
+Classrooms = require 'collections/Classrooms'
 LevelSession = require 'models/LevelSession'
 Prepaids = require 'collections/Prepaids'
+Levels = require 'collections/Levels'
 RootView = require 'views/core/RootView'
 template = require 'templates/courses/classroom-view'
 User = require 'models/User'
@@ -36,9 +39,7 @@ module.exports = class ClassroomView extends RootView
     @courses = new CocoCollection([], { url: "/db/course", model: Course})
     @courses.comparator = '_id'
     @supermodel.loadCollection(@courses)
-    @campaigns = new CocoCollection([], { url: "/db/campaign", model: Campaign })
     @courses.comparator = '_id'
-    @supermodel.loadCollection(@campaigns, { data: { type: 'course' }})
     @courseInstances = new CocoCollection([], { url: "/db/course_instance", model: CourseInstance})
     @courseInstances.comparator = 'courseID'
     @supermodel.loadCollection(@courseInstances, { data: { classroomID: classroomID } })
@@ -46,11 +47,19 @@ module.exports = class ClassroomView extends RootView
     @prepaids.comparator = '_id'
     @prepaids.fetchByCreator(me.id)
     @supermodel.loadCollection(@prepaids)
-    @users = new CocoCollection([], { url: "/db/classroom/#{classroomID}/members", model: User })
+    @users = new CocoCollection([], { url: "/db/classroom/#{classroomID}/members?memberLimit=100", model: User })
     @users.comparator = (user) => user.broadName().toLowerCase()
     @supermodel.loadCollection(@users)
     @listenToOnce @courseInstances, 'sync', @onCourseInstancesSync
     @sessions = new CocoCollection([], { model: LevelSession })
+    @ownedClassrooms = new Classrooms()
+    @ownedClassrooms.fetchMine({data: {project: '_id'}})
+    @supermodel.trackCollection(@ownedClassrooms)
+    @levels = new Levels()
+    @levels.fetchForClassroom(classroomID, {data: {project: 'name,original,practice,slug'}})
+    @levels.on 'add', (model) -> @_byId[model.get('original')] = model # so you can 'get' them
+    @supermodel.trackCollection(@levels)
+    window.tracker?.trackEvent 'Students Class Loaded', category: 'Students', classroomID: classroomID, ['Mixpanel']
 
   onCourseInstancesSync: ->
     @sessions = new CocoCollection([], { model: LevelSession })
@@ -79,7 +88,6 @@ module.exports = class ClassroomView extends RootView
   onLoaded: ->
     @teacherMode = me.isAdmin() or @classroom.get('ownerID') is me.id
     userSessions = @sessions.groupBy('creator')
-    @users.remove(@users.where({ deleted: true }))
     for user in @users.models
       user.sessions = new CocoCollection(userSessions[user.id], { model: LevelSession })
       user.sessions.comparator = 'changed'
@@ -87,9 +95,7 @@ module.exports = class ClassroomView extends RootView
     for courseInstance in @courseInstances.models
       courseID = courseInstance.get('courseID')
       course = @courses.get(courseID)
-      campaignID = course.get('campaignID')
-      campaign = @campaigns.get(campaignID)
-      courseInstance.sessions.campaign = campaign
+      courseInstance.sessions.course = course
     super()
 
   afterRender: ->
@@ -113,8 +119,7 @@ module.exports = class ClassroomView extends RootView
     userID = $(e.target).closest('.btn').data('user-id')
     if @prepaids.totalMaxRedeemers() - @prepaids.totalRedeemers() > 0
       # Have an unused enrollment, enroll student immediately instead of opening the enroll modal
-      prepaid = @prepaids.find((prepaid) -> prepaid.get('properties')?.endDate? and prepaid.openSpots())
-      prepaid = @prepaids.find((prepaid) -> prepaid.openSpots()) unless prepaid
+      prepaid = @prepaids.find((prepaid) -> prepaid.status() is 'available')
       $.ajax({
         method: 'POST'
         url: _.result(prepaid, 'url') + '/redeemers'
@@ -150,10 +155,13 @@ module.exports = class ClassroomView extends RootView
     return '' unless user.sessions?
     session = user.sessions.last()
     return '' unless session
-    campaign = session.collection.campaign
+    course = session.collection.course
     levelOriginal = session.get('level').original
-    campaignLevel = campaign.get('levels')[levelOriginal]
-    return "#{campaign.get('fullName')}, #{campaignLevel.name}"
+    level = @levels.findWhere({original: levelOriginal})
+    lastPlayed = ""
+    lastPlayed += course.get('name') if course
+    lastPlayed += ", #{level.get('name')}" if level
+    lastPlayed
 
   userPlaytimeString: (user) ->
     return '' unless user.sessions?
@@ -173,11 +181,13 @@ module.exports = class ClassroomView extends RootView
     stats.averagePlaytime = if playtime and total then moment.duration(playtime / total, "seconds").humanize() else 0
     stats.totalPlaytime = if playtime then moment.duration(playtime, "seconds").humanize() else 0
 
-    completeSessions = @sessions.filter (s) -> s.get('state')?.complete
+    levelPracticeMap = {}
+    levelPracticeMap[level.id] = level.get('practice') ? false for level in @levels.models
+    completeSessions = @sessions.filter (s) -> s.get('state')?.complete and not levelPracticeMap[s.get('levelID')]
     stats.averageLevelsComplete = if @users.size() then (_.size(completeSessions) / @users.size()).toFixed(1) else 'N/A'  # '
     stats.totalLevelsComplete = _.size(completeSessions)
 
-    enrolledUsers = @users.filter (user) -> user.get('coursePrepaidID')
+    enrolledUsers = @users.filter (user) -> user.isEnrolled()
     stats.enrolledUsers = _.size(enrolledUsers)
     return stats
 
@@ -237,4 +247,4 @@ module.exports = class ClassroomView extends RootView
 
   getLevelURL: (level, course, courseInstance, session) ->
     return null unless @teacherMode and _.all(arguments)
-    "/play/level/#{level.slug}?course=#{course.id}&course-instance=#{courseInstance.id}&session=#{session.id}&observing=true"
+    "/play/level/#{level.get('slug')}?course=#{course.id}&course-instance=#{courseInstance.id}&session=#{session.id}&observing=true"
