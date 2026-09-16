@@ -2,6 +2,9 @@
 @import "app/styles/bootstrap/variables"
 
 #course-victory-modal
+  
+  #loading-error, .loading-screen
+    margin-top: 160px
 
   //- Top-level modal container
   .modal-dialog
@@ -9,9 +12,13 @@
     padding-top: 0
     width: 750px
 
+    @media screen and ( max-height: 625px )
+      margin-top: -50px
+
     .modal-content
       position: relative
       margin-top: -251px
+      box-shadow: none
 
   //- Header
 
@@ -48,25 +55,4 @@
       top: -15px
       background: #ba1d00
       padding: 6px 6px 3px
-
-  .modal-body
-    padding: 30px 20px 0
-    position: relative
-    top: 80px
-    margin-top: 80px
-    
-    .well-parchment
-      margin-top: 20px
-    
-  
-    
-  
-html.no-borderimage
-  #course-victory-modal
-    .modal-dialog
-      margin-top: 251px
-    .background-wrapper
-      border: 0
-      background: url("/images/pages/play/level/modal/victory_modal_background.png")
-      height: 713px
 

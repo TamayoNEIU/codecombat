@@ -1,0 +1,123 @@
+// TODO: This file was created by bulk-decaffeinate.
+// Sanity-check the conversion and remove this comment.
+/*
+ * decaffeinate suggestions:
+ * DS002: Fix invalid constructor
+ * DS102: Remove unnecessary code created because of implicit returns
+ * DS206: Consider reworking classes to avoid initClass
+ * DS207: Consider shorter variations of null checks
+ * Full docs: https://github.com/decaffeinate/decaffeinate/blob/main/docs/suggestions.md
+ */
+let AchievementPopup
+require('app/styles/achievements.sass')
+const CocoView = require('views/core/CocoView')
+const template = require('app/templates/core/achievement-popup')
+const User = require('../../models/User')
+const Achievement = require('../../models/Achievement')
+
+module.exports = (AchievementPopup = (function () {
+  AchievementPopup = class AchievementPopup extends CocoView {
+    static initClass () {
+      this.prototype.className = 'achievement-popup'
+      this.prototype.template = template
+    }
+
+    constructor (options) {
+      super(options)
+      this.achievement = options.achievement
+      this.earnedAchievement = options.earnedAchievement
+      this.container = options.container || this.getContainer()
+      this.popup = options.container
+      if (this.popup == null) { this.popup = true }
+      if (this.popup) { this.className += ' popup' }
+      this.render()
+    }
+
+    calculateData () {
+      let achievedXP, data
+      const currentRank = me.rank()
+      const nextRank = currentRank + 1
+      const currentRankXP = User.expForRank(currentRank)
+      const nextRankXP = User.expForRank(nextRank)
+      const totalXPNeeded = nextRankXP - currentRankXP
+      const expFunction = this.achievement.getExpFunction()
+      let currentXP = me.get('points', true)
+      if (me.isInGodMode()) { currentXP = currentXP + 1000000 } // keep the XP basis consistent with me.rank(), which applies the same god-mode boost
+      if (this.achievement.isRepeatable()) {
+        if (this.achievement.isRepeatable()) { achievedXP = expFunction(this.earnedAchievement.get('previouslyAchievedAmount')) * this.achievement.get('worth') }
+      } else {
+        achievedXP = this.achievement.get('worth', true)
+      }
+      const previousXP = currentXP - achievedXP
+      const rankedUp = (currentXP - achievedXP) < currentRankXP
+      // console.debug 'Ranked up' if rankedUp
+      let alreadyAchievedPercentage = (100 * (previousXP - currentRankXP)) / totalXPNeeded
+      if (alreadyAchievedPercentage < 0) { alreadyAchievedPercentage = 0 } // In case of rank up
+      const newlyAchievedPercentage = rankedUp ? (100 * (currentXP - currentRankXP)) / totalXPNeeded : (100 * achievedXP) / totalXPNeeded
+
+      // console.debug "Current rank is #{currentRank} (#{currentRankXP} xp), next rank is #{nextRank} (#{nextRankXP} xp)."
+      // console.debug "Need a total of #{nextRankXP - currentRankXP}, already had #{previousXP} and just now earned #{achievedXP} totalling on #{currentXP}"
+
+      return data = {
+        title: this.achievement.i18nName(),
+        imgURL: this.achievement.getImageURL(),
+        description: this.achievement.i18nDescription(),
+        rank: currentRank,
+        currentXP,
+        newXP: achievedXP,
+        leftXP: nextRankXP - currentXP,
+        oldXPWidth: alreadyAchievedPercentage,
+        newXPWidth: newlyAchievedPercentage,
+        leftXPWidth: 100 - newlyAchievedPercentage - alreadyAchievedPercentage
+      }
+    }
+
+    getRenderData () {
+      const c = super.getRenderData()
+      _.extend(c, this.calculateData())
+      c.style = this.achievement.getStyle()
+      c.popup = true
+      c.$ = $ // Allows the jade template to do i18n
+      return c
+    }
+
+    render () {
+      super.render()
+      this.container.prepend(this.$el)
+      if (this.popup) {
+        const hide = () => {
+          if (this.destroyed) { return }
+          return this.$el.animate({ left: -600 }, () => {
+            this.$el.remove()
+            return this.destroy()
+          })
+        }
+        this.$el.animate({ left: 0 })
+        this.$el.on('click', hide)
+        if (!$('#editor-achievement-edit-view').length) { return _.delay(hide, 10000) }
+      }
+    }
+
+    getContainer () {
+      if (!this.container) {
+        this.container = $('.achievement-popup-container')
+        if (!this.container.length) {
+          $('body').append('<div class="achievement-popup-container"></div>')
+          this.container = $('.achievement-popup-container')
+        }
+      }
+      return this.container
+    }
+
+    afterRender () {
+      super.afterRender()
+      return _.delay(this.initializeTooltips, 1000) // TODO this could be smoother
+    }
+
+    initializeTooltips () {
+      return $('.progress-bar').addClass('has-tooltip').tooltip()
+    }
+  }
+  AchievementPopup.initClass()
+  return AchievementPopup
+})())

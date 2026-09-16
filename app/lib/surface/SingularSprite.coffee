@@ -1,4 +1,5 @@
 SpriteBuilder = require 'lib/sprites/SpriteBuilder'
+createjs = require 'lib/createjs-parts'
 
 floors = ['Dungeon Floor', 'Indoor Floor', 'Grass', 'Grass01', 'Grass02', 'Grass03', 'Grass04', 'Grass05', 'Goal Trigger', 'Obstacle', 'Sand 01', 'Sand 02', 'Sand 03', 'Sand 04', 'Sand 05', 'Sand 06', 'Talus 1', 'Talus 2', 'Talus 3', 'Talus 4', 'Talus 5', 'Talus 6', 'Firn 1', 'Firn 2', 'Firn 3', 'Firn 4', 'Firn 5', 'Firn 6', 'Ice Rink 1', 'Ice Rink 2', 'Ice Rink 3', 'Firn Cliff', 'VR Floor', 'Classroom Floor']
 
@@ -26,7 +27,8 @@ module.exports = class SingularSprite extends createjs.Sprite
     reg = action.positions?.registration or @thangType.get('positions')?.registration or {x:0, y:0}
 
     if action.animation
-      @framerate = (action.framerate ? 20) * (action.speed ? 1)
+      rawFramerate = @thangType.get('raw')?.animations?[action.animation]?.framerate  # raster sheets carry their import framerate
+      @framerate = (action.framerate ? rawFramerate ? 20) * (action.speed ? 1)
 
       func = if @paused then '_gotoAndStop' else '_gotoAndPlay'
       animationName = @spriteSheetPrefix + actionName
@@ -34,7 +36,8 @@ module.exports = class SingularSprite extends createjs.Sprite
       if @currentFrame is 0 or @usePlaceholders
         @_gotoAndStop(0)
         @notifyActionNeedsRender(action)
-        bounds = @thangType.get('raw').animations[action.animation].bounds
+        bounds = @thangType.get('raw')?.animations?[action.animation]?.bounds # checking for just-prerendered-spritesheet thangs
+        bounds ?= [0, 0, 1, 1]
         actionScale = (action.scale ? @thangType.get('scale') ? 1)
         @scaleX = actionScale * bounds[2] / (SPRITE_PLACEHOLDER_WIDTH * @resolutionFactor)
         @scaleY = actionScale * bounds[3] / (SPRITE_PLACEHOLDER_WIDTH * @resolutionFactor)
@@ -45,7 +48,7 @@ module.exports = class SingularSprite extends createjs.Sprite
         @regX = -reg.x * scale
         @regY = -reg.y * scale
         @scaleX = @scaleY = 1 / @resolutionFactor
-        @framerate = action.framerate or 20
+        @framerate = (action.framerate ? rawFramerate ? 20) * (action.speed ? 1)
         if randomStart and frames = @spriteSheet.getAnimation(animationName)?.frames
           @currentAnimationFrame = Math.floor(Math.random() * frames.length)
 

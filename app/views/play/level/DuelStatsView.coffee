@@ -1,5 +1,6 @@
+require('app/styles/play/level/duel-stats-view.sass')
 CocoView = require 'views/core/CocoView'
-template = require 'templates/play/level/duel-stats-view'
+template = require 'app/templates/play/level/duel-stats-view'
 ThangAvatarView = require 'views/play/level/ThangAvatarView'
 utils = require 'core/utils'
 
@@ -19,25 +20,27 @@ module.exports = class DuelStatsView extends CocoView
     'god:new-world-created': 'onNewWorld'
     'god:streaming-world-updated': 'onNewWorld'
     'surface:frame-changed': 'onFrameChanged'
+    'sprite:speech-updated': 'onSpriteDialogue'
+    'level:sprite-clear-dialogue': 'onSpriteClearDialogue'
 
   constructor: (options) ->
     super options
     options.thangs = _.filter options.thangs, 'inThangList'
     unless options.otherSession
-      options.otherSession = get: (prop) -> {
+      options.otherSession = get: (prop) => {
         creatorName: $.i18n.t 'ladder.simple_ai'
+        creator: me.get('_id') # fake a creator to make sure we don't anonymize ai names
         team: if options.session.get('team') is 'humans' then 'ogres' else 'humans'
         heroConfig: options.session.get('heroConfig')
       }[prop]
-    @showsGold = options.level.get('slug') in ['wakka-maul']
-    @showsPower = options.level.get('slug') not in ['wakka-maul', 'dueling-grounds', 'cavern-survival', 'multiplayer-treasure-grove']
+    @showsPower = options.level.get('slug') not in ['wakka-maul', 'cross-bones', 'dueling-grounds', 'cavern-survival', 'multiplayer-treasure-grove']
     @teamGold = {}
     @players = (@formatPlayer team for team in ['humans', 'ogres'])
 
   formatPlayer: (team) ->
     p = team: team
     session = _.find [@options.session, @options.otherSession], (s) -> s.get('team') is team
-    p.name = session.get 'creatorName'
+    p.name = utils.getCorrectName(session)
     p.heroThangType = (session.get('heroConfig') ? {}).thangType or '529ffbf1cf1818f2be000001'
     p.heroID = if team is 'ogres' then 'Hero Placeholder 1' else 'Hero Placeholder'
     p
@@ -52,6 +55,7 @@ module.exports = class DuelStatsView extends CocoView
     @avatars ?= {}
     return if @avatars[team]
     thang = _.find @options.thangs, id: heroID
+    return unless thang
     @avatars[team] = avatar = new ThangAvatarView thang: thang, includeName: false, supermodel: @supermodel
     @$find(team, '.thang-avatar-placeholder').replaceWith avatar.$el
     avatar.render()
@@ -64,8 +68,8 @@ module.exports = class DuelStatsView extends CocoView
 
   update: ->
     for player in @players
-      thang = _.find @options.thangs, id: @avatars[player.team].thang.id
-      @updateHealth thang
+      if thang = (_.find @options.thangs, id: @avatars?[player.team]?.thang?.id)
+        @updateHealth thang
     @updatePower() if @showsPower
 
   updateHealth: (thang) ->
@@ -88,7 +92,15 @@ module.exports = class DuelStatsView extends CocoView
       thrower: 9
       scout: 18
     powers = humans: 0, ogres: 0
-    for thang in @options.thangs when thang.health > 0 and thang.exists
+    setPowerTeams = []
+    for player in @players
+      hero = _.find @options.thangs, id: @avatars?[player.team]?.thang?.id
+      continue unless hero
+      if hero.teamPower? and powers[hero.team]?
+        powers[hero.team] = hero.teamPower
+        setPowerTeams.push hero.team
+    # Count only thangs from teams which heroes doesn't have teamPower
+    for thang in @options.thangs when thang.team not in setPowerTeams and thang.health > 0 and thang.exists
       powers[thang.team] += @costTable[thang.type] or 0 if powers[thang.team]?
     for player in @players
       utils.replaceText @$find(player.team, '.power-value'), powers[player.team]
@@ -101,7 +113,14 @@ module.exports = class DuelStatsView extends CocoView
     super()
 
   onGoldChanged: (e) ->
-    return unless @showsGold
+    return unless @options.showsGold
     return if @teamGold[e.team] is e.gold
     @teamGold[e.team] = e.gold
     utils.replaceText @$find(e.team, '.gold-value'), '' + e.gold
+
+  onSpriteDialogue: (e) ->
+    return unless e.message
+    @$el.css 'display', 'none'  # Hide it while a blue message is showing
+
+  onSpriteClearDialogue: ->
+    @$el.css 'display', 'flex'  # Show it

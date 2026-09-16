@@ -22,13 +22,17 @@ SpriteBuilder = require 'lib/sprites/SpriteBuilder'
 CocoClass = require 'core/CocoClass'
 SegmentedSprite = require './SegmentedSprite'
 SingularSprite = require './SingularSprite'
+RasterAtlasSprite = require 'ozaria/engine/surface/RasterAtlasSprite'
 ThangType = require 'models/ThangType'
+createjs = require 'lib/createjs-parts'
+utils = require 'core/utils'
+{ log, startTimer } = require 'ozaria/site/common/logger'
 
 NEVER_RENDER_ANYTHING = false # set to true to test placeholders
 
 module.exports = LayerAdapter = class LayerAdapter extends CocoClass
 
-  # Intermediary between a Surface Stage and a top-level static normal Container or hot-swapped WebGL SpriteContainer.
+  # Intermediary between a Surface Stage and a top-level static normal Container (used to also do hot-swapped WebGL SpriteContainer).
   # It handles zooming in different ways and, if webGL, creating and assigning spriteSheets.
 
   @TRANSFORM_SURFACE: 'surface'  # Layer moves/scales/zooms with the Surface of the World
@@ -45,6 +49,7 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
   resolutionFactor: SPRITE_RESOLUTION_FACTOR
   numThingsLoading: 0
   lanks: null
+  labels: null
   spriteSheet: null
   container: null
   customGraphics: null
@@ -62,19 +67,42 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     @transformStyle = options.transform ? LayerAdapter.TRANSFORM_SURFACE
     @camera = options.camera
     @updateLayerOrder = _.throttle @updateLayerOrder, 1000 / 30  # Don't call multiple times in one frame; 30 FPS is probably good enough
+    @lanks = []
+    @labels = []
+
+    if utils.isOzaria
+      @totalTimeSpentRendering = 0
+
+      # Explicitly setting class as non reactive for performance benefit.
+      Vue.nonreactive(@)
+
+      @reportRenderTime = _.debounce(
+        () =>
+          if @totalTimeSpentRendering != 0 and Math.random() < 0.01
+            log(
+              'LayerAdapter Render Time', {
+                totalTimeSpentRendering: @totalTimeSpentRendering
+                name: @name
+              }
+            )
+        500
+      )
 
     @webGL = !!options.webGL
     if @webGL
       @initializing = true
       @spriteSheet = @_renderNewSpriteSheet(false) # builds an empty spritesheet
-      @container = new createjs.SpriteContainer(@spriteSheet)
+      @container = new createjs.Container(@spriteSheet)
       @actionRenderState = {}
       @toRenderBundles = []
-      @lanks = []
       @initializing = false
 
     else
       @container = new createjs.Container()
+
+    if utils.isOzaria
+      # Explicitly setting class as non reactive for performance benefit.
+      Vue.nonreactive(@container)
 
   toString: -> "<Layer #{@layerPriority}: #{@name}>"
 
@@ -95,7 +123,7 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     if aLank = a.lank
       if aThang = aLank.thang
         aPos = aThang.pos
-        if aThang.health < 0 and aThang.pos.z <= aThang.depth / 2
+        if utils.isCodeCombat and aThang.health < 0 and aThang.pos.z <= aThang.depth / 2
           # Nice for not being knee deep in the dead, just not nice for ogres flying behind trees when exploded
           --az
     if bLank = b.lank
@@ -151,7 +179,7 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     lank.layer = @
     @listenTo(lank, 'action-needs-render', @onActionNeedsRender)
     @lanks.push lank
-    lank.thangType.initPrerenderedSpriteSheets() unless currentView.getQueryVariable 'jitSpritesheets'
+    lank.thangType.initPrerenderedSpriteSheets() unless utils.getQueryVariable 'jitSpritesheets'
     prerenderedSpriteSheet = lank.thangType.getPrerenderedSpriteSheet(lank.options.colorConfig, @defaultSpriteType)
     prerenderedSpriteSheet?.markToLoad()
     @loadThangType(lank.thangType)
@@ -166,6 +194,17 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     @container.removeChild lank.sprite
     @lanks = _.without @lanks, lank
 
+  addLabel: (label) ->
+    @labels.push label unless label in @labels
+    @addChild label.label
+    @addChild label.background
+    @updateLayerOrder()
+
+  removeLabel: (label) ->
+    @removeChild label.label if label.label
+    @removeChild label.background if label.background
+    @labels = _.without @labels, label
+
   #- Loading network resources dynamically
 
   loadThangType: (thangType) ->
@@ -174,10 +213,32 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
       thangType.fetch() unless thangType.loading
       @numThingsLoading++
       @listenToOnce(thangType, 'sync', @somethingLoaded)
+      if Math.random() < 0.01 and utils.isOzaria
+        @listenToOnce(thangType, 'sync', ((loadingTimer) -> -> log('ThangType Loaded', {
+          loadTimeMS: loadingTimer()
+          original: thangType.get('original')
+          name: thangType.get('name')
+        }))(startTimer()))
     else if thangType.get('raster') and not thangType.loadedRaster
       thangType.loadRasterImage()
       @listenToOnce(thangType, 'raster-image-loaded', @somethingLoaded)
       @numThingsLoading++
+      if Math.random() < 0.01 and utils.isOzaria
+        @listenToOnce(thangType, 'raster-image-loaded', ((loadingTimer) -> -> log('ThangType Loaded', {
+          loadTimeMS: loadingTimer()
+          original: thangType.get('original')
+          name: thangType.get('name')
+        }))(startTimer()))
+    else if thangType.get('spriteType') is 'rasterAtlas' and utils.isOzaria
+      return if thangType.loadingRasterAtlas or thangType.loadedRasterAtlas
+      thangType.loadAllRasterTextureAtlases()
+      @listenToOnce(thangType, 'texture-atlas-loaded', -> @somethingLoaded(thangType))
+      @numThingsLoading++
+    else if thangType.hasRasterRawAssets() and not thangType.rasterRawImagesLoaded()
+      # Listen before loading in case cached images settle synchronously.
+      @listenToOnce(thangType, 'raster-raw-images-loaded', @somethingLoaded)
+      @numThingsLoading++
+      thangType.loadRasterRawImages()
     else if prerenderedSpriteSheet = thangType.getPrerenderedSpriteSheetToLoad()
       startedLoading = prerenderedSpriteSheet.loadImage()
       return if not startedLoading
@@ -202,8 +263,14 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     if lank.thangType.get('raster')
       @upsertActionToRender(lank.thangType)
     else
+      if utils.isOzaria
+        # Cinematic lanks preload all their own animations and don't use the default action list.
+        defaultActions = if lank?.isCinematicLank then [] else ThangType.defaultActions
+        defaultRenderableActions = defaultActions.concat(lank.thangType.get('preLoadActions') or [])
+      else
+        defaultRenderableActions = ThangType.defaultActions.concat(lank.thangType.get('preLoadActions') or [])
       for action in _.values(lank.thangType.getActions())
-        continue unless _.any ThangType.defaultActions, (prefix) -> _.string.startsWith(action.name, prefix)
+        continue unless _.any defaultRenderableActions, (prefix) -> _.string.startsWith(action.name, prefix)
         @upsertActionToRender(lank.thangType, action.name, lank.options.colorConfig)
 
   upsertActionToRender: (thangType, actionName, colorConfig) ->
@@ -229,6 +296,9 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     @_renderNewSpriteSheet()
 
   _renderNewSpriteSheet: (async) ->
+    return if @destroyed
+    if utils.isOzaria
+      @renderNewSpriteSheetStartedTime = performance?.now()
     @asyncBuilder.stopAsync() if @asyncBuilder
     @asyncBuilder = null
 
@@ -243,7 +313,7 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     builder.addFrame(placeholder)
 
     # Add custom graphics
-    extantGraphics = if @spriteSheet?.resolutionFactor is @resolutionFactor then @spriteSheet.getAnimations() else []
+    extantGraphics = if @spriteSheet?.resolutionFactor is @resolutionFactor then @spriteSheet.animations else []
     for key, graphic of @customGraphics
       if key in extantGraphics
         graphic = new createjs.Sprite(@spriteSheet)
@@ -260,50 +330,67 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
       colorConfig = bundleGrouping[0].colorConfig
       actionNames = (bundle.actionName for bundle in bundleGrouping)
       args = [thangType, colorConfig, actionNames, builder]
-      if thangType.get('raw')
-        if (thangType.get('spriteType') or @defaultSpriteType) is 'segmented'
+      if thangType.get('raw') or thangType.get('prerenderedSpriteSheetData')
+        # Raster keyframe animations only work through the singular path.
+        if (thangType.get('spriteType') or @defaultSpriteType) is 'segmented' and not thangType.hasRasterAnimations()
           @renderSegmentedThangType(args...)
         else
           @renderSingularThangType(args...)
+      else if thangType.get('spriteType') is 'rasterAtlas' and utils.isOzaria
+        @buildRasterAtlasSpriteSheet(thangType, actionNames)
       else
         @renderRasterThangType(thangType, builder)
 
     if async
       try
-        builder.buildAsync()
+        builder.buildAsync() # will build empty spritesheet for rasterAtlas since not attaching anything to it, but its still required because of its coupling with the lank
       catch e
         @resolutionFactor *= 0.9
-        #console.log "  Rerendering sprite sheet didn't fit, going down to resolutionFactor", @resolutionFactor, "async", async
+        console.log('Failed to build sprite sheet async:', e)
         return @_renderNewSpriteSheet(async)
       builder.on 'complete', @onBuildSpriteSheetComplete, @, true, builder
       @asyncBuilder = builder
     else
-      sheet = builder.build()
+      try
+        sheet = builder.build()
+      catch e
+        @resolutionFactor *= 0.9
+        console.log('Failed to build sprite sheet sync:', e)
+        return @_renderNewSpriteSheet(async)
       @onBuildSpriteSheetComplete({async:async}, builder)
       return sheet
 
   onBuildSpriteSheetComplete: (e, builder) ->
     return if @initializing or @destroyed
+    if performance and utils.isOzaria
+      @totalTimeSpentRendering += performance?.now() - @renderNewSpriteSheetStartedTime
+      @reportRenderTime()
     @asyncBuilder = null
+    builder?.removeAllEventListeners()
 
-    if builder.spriteSheet._images.length > 1
-      total = 0
-      # get a rough estimate of how much smaller the spritesheet needs to be
-      for image, index in builder.spriteSheet._images
-        total += image.height / builder.maxHeight
-      @resolutionFactor /= (Math.max(1.25, Math.sqrt(total)))
-      #console.log "#{@name} rerendering new sprite sheet with resolutionFactor", @resolutionFactor, "async", e.async
-      @_renderNewSpriteSheet(e.async)
-      return
+    if @spriteSheet
+      # This is required for old canvas to be garbage collected.
+      @destroySpriteSheet()
 
     @spriteSheet = builder.spriteSheet
+    builder = null
     @spriteSheet.resolutionFactor = @resolutionFactor
     oldLayer = @container
-    @container = new createjs.SpriteContainer(@spriteSheet)
+    oldLayer?.removeAllEventListeners()
+
+    @container = new createjs.Container(@spriteSheet)
+
+    # Explicitly setting object as non reactive for performance benefit.
+    if utils.isOzaria
+      Vue.nonreactive(@container)
+
     for lank in @lanks
       console.log 'zombie sprite found on layer', @name if lank.destroyed
       continue if lank.destroyed
       @setSpriteToLank(lank)
+    for label in @labels when label.label
+      @container.addChild label.label
+      @container.addChild label.background
     for prop in ['scaleX', 'scaleY', 'regX', 'regY']
       @container[prop] = oldLayer[prop]
     if parent = oldLayer.parent
@@ -323,6 +410,7 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     @toRenderBundles = []
     @actionRenderState = {}
     @initializing = true
+    @destroySpriteSheet()
     @spriteSheet = @_renderNewSpriteSheet(false) # builds an empty spritesheet
     @initializing = false
 
@@ -332,7 +420,7 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     # TODO: Experiment with this. Perhaps have rectangles if default layer is obstacle or floor,
     # and different colors for different layers.
     g = new createjs.Graphics()
-    g.setStrokeStyle(5)
+    g.setStrokeStyle(1)
     color = {
       'Land': [0, 50, 0]
       'Ground': [230, 230, 230]
@@ -345,7 +433,7 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     color.push 0.7
     g.beginFill(createjs.Graphics.getRGB(color...))
     width = @resolutionFactor * SPRITE_PLACEHOLDER_WIDTH
-    bounds = [0, 0, width, width]
+    bounds = [1, 1, width - 2, width - 2]
     if @name in ['Default', 'Ground', 'Floating', 'Path']
       g.drawEllipse(bounds...)
     else
@@ -358,24 +446,29 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     prerenderedSpriteSheet = thangType.getPrerenderedSpriteSheet(colorConfig, 'segmented')
     if prerenderedSpriteSheet and not prerenderedSpriteSheet.loadedImage
       return
+    else if prerenderedSpriteSheet
+      animations = prerenderedSpriteSheet.spriteSheet._animations
+      renderedActions = _.zipObject(animations, _.times(animations.length, -> true))
     containersToRender = thangType.getContainersForActions(actionNames)
     #console.log 'render segmented', thangType.get('name'), actionNames, colorConfig, 'because we do not have prerendered sprite sheet?', prerenderedSpriteSheet
     spriteBuilder = new SpriteBuilder(thangType, {colorConfig: colorConfig})
     for containerGlobalName in containersToRender
       containerKey = @renderGroupingKey(thangType, containerGlobalName, colorConfig)
-      if @spriteSheet?.resolutionFactor is @resolutionFactor and containerKey in @spriteSheet.getAnimations()
+      if @spriteSheet?.resolutionFactor is @resolutionFactor and containerKey in @spriteSheet.animations
         container = new createjs.Sprite(@spriteSheet)
         container.gotoAndStop(containerKey)
         frame = spriteSheetBuilder.addFrame(container)
-      else if prerenderedSpriteSheet
+      else if prerenderedSpriteSheet and renderedActions[containerGlobalName]
         container = new createjs.Sprite(prerenderedSpriteSheet.spriteSheet)
         container.gotoAndStop(containerGlobalName)
         scale = @resolutionFactor / (prerenderedSpriteSheet.get('resolutionFactor') or 1)
         frame = spriteSheetBuilder.addFrame(container, null, scale)
       else
         container = spriteBuilder.buildContainerFromStore(containerGlobalName)
+        continue unless container  # e.g. raster image not loaded yet; rebuild picks it up
         frame = spriteSheetBuilder.addFrame(container, null, @resolutionFactor * (thangType.get('scale') or 1))
       spriteSheetBuilder.addAnimation(containerKey, [frame], false)
+
 
   #- Rendering sprite sheets for singular thang types
 
@@ -402,13 +495,17 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
 
     spriteBuilder = new SpriteBuilder(thangType, {colorConfig: colorConfig})
 
-    animationGroups = _.groupBy animationActions, (action) -> action.animation
-    for animationName, actions of animationGroups
+    # Group by animation AND effective scale: frames are baked at one scale,
+    # so actions sharing an animation at different scales need separate frames
+    # (the editor path already keys its frames map by scale, ThangType.js addGeneralFrames).
+    animationGroups = _.groupBy animationActions, (action) -> action.animation + '~' + (action.scale or thangType.get('scale') or 1)
+    for groupKey, actions of animationGroups
+      animationName = actions[0].animation
       renderAll = _.any actions, (action) -> action.frames is undefined
       scale = actions[0].scale or thangType.get('scale') or 1
 
       actionKeys = (@renderGroupingKey(thangType, action.name, colorConfig) for action in actions)
-      if @spriteSheet?.resolutionFactor is @resolutionFactor and _.all(actionKeys, (key) => key in @spriteSheet.getAnimations())
+      if @spriteSheet?.resolutionFactor is @resolutionFactor and _.all(actionKeys, (key) => key in @spriteSheet.animations)
         framesNeeded = _.uniq(_.flatten((@spriteSheet.getAnimation(key)).frames for key in actionKeys))
         framesMap = {}
         for frame in framesNeeded
@@ -433,6 +530,7 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
         continue
 
       mc = spriteBuilder.buildMovieClip(animationName, null, null, null, {'temp':0})
+      continue unless mc  # e.g. raster sheet not loaded yet; rebuild picks it up
 
       if renderAll
         res = spriteSheetBuilder.addMovieClip(mc, null, scale * @resolutionFactor)
@@ -473,11 +571,18 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
           spriteSheetBuilder.addAnimation(name, [frame], false)
         continue
       container = spriteBuilder.buildContainerFromStore(containerName)
+      continue unless container  # e.g. raster image not loaded yet; rebuild picks it up
       scale = actions[0].scale or thangType.get('scale') or 1
       frame = spriteSheetBuilder.addFrame(container, null, scale * @resolutionFactor)
       for action in actions
         name = @renderGroupingKey(thangType, action.name, colorConfig)
         spriteSheetBuilder.addAnimation(name, [frame], false)
+
+  #- Build the spritesheet for rasterAtlas sprite type
+
+  buildRasterAtlasSpriteSheet: (thangType, actionNames) ->
+    spriteBuilder = new SpriteBuilder(thangType)
+    spriteBuilder.buildSpriteSheetFromTextureAtlas(actionNames) # builds and attaches the spritesheet to the movie clip file
 
   #- Rendering frames for raster thang types
 
@@ -485,15 +590,10 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     unless thangType.rasterImage
       console.error("Cannot render the LayerAdapter SpriteSheet until the raster image for <#{thangType.get('name')}> is loaded.")
 
-    # hack for IE9, otherwise width/height are not set
-    $img = $(thangType.rasterImage[0])
-    $('body').append($img)
-
     bm = new createjs.Bitmap(thangType.rasterImage[0])
     scale = thangType.get('scale') or 1
     frame = spriteSheetBuilder.addFrame(bm, null, scale)
     spriteSheetBuilder.addAnimation(@renderGroupingKey(thangType), [frame], false)
-    $img.remove()
 
   #- Distributing new Segmented/Singular/RasterSprites to Lanks
 
@@ -516,8 +616,13 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
       sprite.gotoAndStop(@renderGroupingKey(lank.thangType))
       sprite.baseScaleX = sprite.baseScaleY = 1
 
+    else if lank.thangType.get('spriteType') is 'rasterAtlas' and utils.isOzaria
+      sprite = new RasterAtlasSprite(lank.thangType)
+
     else
-      SpriteClass = if (lank.thangType.get('spriteType') or @defaultSpriteType) is 'segmented' then SegmentedSprite else SingularSprite
+      # Raster keyframe animations only work through SingularSprite.
+      useSegmented = (lank.thangType.get('spriteType') or @defaultSpriteType) is 'segmented' and not lank.thangType.hasRasterAnimations()
+      SpriteClass = if useSegmented then SegmentedSprite else SingularSprite
       prefix = @renderGroupingKey(lank.thangType, null, lank.options.colorConfig) + '.'
       sprite = new SpriteClass(@spriteSheet, lank.thangType, prefix, @resolutionFactor)
 
@@ -537,7 +642,14 @@ module.exports = LayerAdapter = class LayerAdapter extends CocoClass
     key += '.'+grouping if grouping
     key
 
+  destroySpriteSheet: ->
+    return unless @spriteSheet
+    for image, i in @spriteSheet._images when image
+      image.width = image.height = 0
+      @spriteSheet._images[i] = null
+
   destroy: ->
     child.destroy?() for child in @container.children
     @asyncBuilder.stopAsync() if @asyncBuilder
+    @destroySpriteSheet()
     super()

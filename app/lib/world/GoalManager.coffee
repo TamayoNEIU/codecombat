@@ -26,8 +26,19 @@ module.exports = class GoalManager extends CocoClass
     @goalStates = {} # goalID -> object (complete, frameCompleted)
     @userCodeMap = {} # @userCodeMap.thangID.methodName.aether.raw = codeString
     @thangTeams = {}
+    @hasProgressed = false # capstoneStage progression
     @initThangTeams()
     @addGoal goal for goal in @initialGoals if @initialGoals
+    if utils.showOzaria() and @options?.session and @options?.additionalGoals
+      additionalGoals = _.cloneDeep(@options.additionalGoals)
+      capstoneStage = @options.capstoneStage || 1 # passed in from PlayLevelView
+      stages = _.filter(additionalGoals, (ag) -> ag.stage <= capstoneStage and ag.stage > 0)
+      goals = _.map(stages, (stage) -> stage.goals.map((goal) ->
+        goal.stage = stage.stage
+        return goal
+      ))
+      unwrappedGoals = _.flatten(goals)
+      @addGoal goal for goal in unwrappedGoals
 
   initThangTeams: ->
     return unless @world
@@ -38,6 +49,7 @@ module.exports = class GoalManager extends CocoClass
 
   subscriptions:
     'god:new-world-created': 'onNewWorldCreated'
+    'god:new-html-goal-states': 'onNewHTMLGoalStates'
     'level:restarted': 'onLevelRestarted'
 
   backgroundSubscriptions:
@@ -59,6 +71,8 @@ module.exports = class GoalManager extends CocoClass
 
   # world generator gets current goals from the main instance
   getGoals: -> @goals
+
+  getRemainingGoals: -> _.filter(@goalStates, (state) -> state.status != 'success')
 
   # background instance created by world generator,
   # gets these goals and code, and is told to be all ears during world gen
@@ -86,17 +100,60 @@ module.exports = class GoalManager extends CocoClass
     @world = e.world
     @updateGoalStates(e.goalStates) if e.goalStates?
 
+  onNewHTMLGoalStates: (e) ->
+    @updateGoalStates(e.goalStates) if e.goalStates?
+
   updateGoalStates: (newGoalStates) ->
     for goalID, goalState of newGoalStates
       continue unless @goalStates[goalID]?
       @goalStates[goalID] = goalState
     @notifyGoalChanges()
 
+  @maxCapstoneStage: (additionalGoals) ->
+    if !additionalGoals
+      return 0
+
+    return _.max(additionalGoals, (goals) -> goals.stage).stage # assuming that additionalGoals will have the goals for the last stage.
+
+  # Progresses the capstone stage if more goals are available
+  # Returns the current capstoneStage
+  progressCapstoneStage: (session, additionalGoals) ->
+    if @hasProgressed # Only ever progress a capstone stage once per GoalManager
+      return
+
+    # In daily speak, we think of initial goals as stage 1 and additional goals
+    # as stage 2 and above. That is why we are starting from 1.
+    capstoneStage = (session.get('state') || {}).capstoneStage || 1
+
+    # The capstoneStage will eventually end up being 1 above the final additionalStage,
+    # when every stage been completed. That means the whole level is complete.
+    if capstoneStage <= GoalManager.maxCapstoneStage(additionalGoals)
+      @hasProgressed = true
+      state = session.get('state') || {}
+      state.capstoneStage = capstoneStage + 1
+      session.set('state', state)
+      session.save(null, { success: -> }) # Save and move on, we don't have time to wait here
+
+  # Checks if the overall goal status is 'success', then progresses
+  # capstone goals to the next stage if there are more goals
+  finishLevel: ->
+    stageFinished = @checkOverallStatus() is 'success'
+    if @options.additionalGoals and stageFinished
+      if utils.showOzaria()
+        @progressCapstoneStage(@options.session, @options.additionalGoals)
+      else
+        @addAdditionalGoals(@options.session, @options.additionalGoals)
+
+    return stageFinished
+
   # IMPLEMENTATION DETAILS
 
   addGoal: (goal) ->
     goal = $.extend(true, {}, goal)
     goal.id = @nextGoalID++ if not goal.id
+    # The initial goals also need a capstone stage if this is indeed goals for a capstone stage:
+    if utils.showOzaria() && !goal.stage && @options?.additionalGoals
+      goal.stage = 1
     return if @goalStates[goal.id]?
     @goals.push(goal)
     goal.isPositive = @goalIsPositive goal.id
@@ -110,11 +167,16 @@ module.exports = class GoalManager extends CocoClass
   notifyGoalChanges: ->
     return if @options.headless
     overallStatus = @checkOverallStatus()
+    if utils.showOzaria()
+      noTimeOutStatuses = ['success', 'failure', null]
+    else
+      noTimeOutStatuses = ['success', 'failure']
     event =
       goalStates: @goalStates
       goals: @goals
       overallStatus: overallStatus
-      timedOut: @world.totalFrames is @world.maxTotalFrames and overallStatus not in ['success', 'failure']
+      timedOut: @world? and (@world.totalFrames is @world.maxTotalFrames and overallStatus not in noTimeOutStatuses)
+      capstoneStage: @options?.capstoneStage
     Backbone.Mediator.publish('goal-manager:new-goal-states', event)
 
   checkOverallStatus: (ignoreIncomplete=false) ->
@@ -123,9 +185,14 @@ module.exports = class GoalManager extends CocoClass
     goals = (g for g in goals when not g.optional)
     goals = (g for g in goals when g.team in [undefined, @team]) if @team
     statuses = (goal.status for goal in goals)
-    overallStatus = 'success' if statuses.length > 0 and _.every(statuses, (s) -> s is 'success' or (ignoreIncomplete and s is null))
-    overallStatus = 'failure' if statuses.length > 0 and 'failure' in statuses
-    #console.log 'got overallStatus', overallStatus, 'from goals', goals, 'goalStates', @goalStates, 'statuses', statuses
+    isSuccess = (s) -> s is 'success' or (ignoreIncomplete and s is null)
+    if _.any(goals.map((g) => g.concepts?.length))
+      conceptStatuses = goals.filter((g) => g.concepts?.length).map((g) => g.status)
+      levelStatuses = goals.filter((g) => !g.concepts?.length).map((g) => g.status)
+      overallStatus = if _.all(levelStatuses, isSuccess) and _.any(conceptStatuses, isSuccess) then 'success' else 'failure'
+    else
+      overallStatus = 'success' if statuses.length > 0 and _.every(statuses, isSuccess)
+      overallStatus = 'failure' if statuses.length > 0 and 'failure' in statuses
     overallStatus
 
   # WORLD GOAL TRACKING
@@ -139,6 +206,8 @@ module.exports = class GoalManager extends CocoClass
         keyFrame: 0 # when it became a 'success' or 'failure'
         team: goal.team
         optional: goal.optional
+        hiddenGoal: goal.hiddenGoal
+        concepts: goal.concepts
       }
       @initGoalState(state, [goal.killThangs, goal.saveThangs], 'killed')
       for getTo in goal.getAllToLocations ? []
@@ -219,6 +288,8 @@ module.exports = class GoalManager extends CocoClass
   checkLinesOfCode: (goalID, who, thang, linesUsed, frameNumber) ->
     return unless linesAllowed = who[thang.id] ? who[thang.team]
     @updateGoalState goalID, thang.id, 'lines', frameNumber if linesUsed > linesAllowed
+    @goalStates[goalID].lines.used = linesUsed
+    @goalStates[goalID].lines.allowed = linesAllowed
 
   wrapUpGoalStates: (finalFrame) ->
     for goalID, state of @goalStates
@@ -258,13 +329,17 @@ module.exports = class GoalManager extends CocoClass
 
   setGoalState: (goalID, status) ->
     state = @goalStates[goalID]
+    if not state
+      console.log('Could not set state for goalID ', goalID)
+      return
+
     state.status = status
     if overallStatus = @checkOverallStatus true
       matchedGoals = (_.find(@goals, {id: goalID}) for goalID, goalState of @goalStates when goalState.status is overallStatus)
       mostEagerGoal = _.min matchedGoals, 'worldEndsAfter'
       victory = overallStatus is 'success'
       tentative = overallStatus is 'success'
-      @world.endWorld victory, mostEagerGoal.worldEndsAfter, tentative if mostEagerGoal isnt Infinity
+      @world?.endWorld victory, mostEagerGoal.worldEndsAfter, tentative if mostEagerGoal isnt Infinity
 
   updateGoalState: (goalID, thangID, progressObjectName, frameNumber) ->
     # A thang has done something related to the goal!
@@ -291,7 +366,7 @@ module.exports = class GoalManager extends CocoClass
       mostEagerGoal = _.min matchedGoals, 'worldEndsAfter'
       victory = overallStatus is 'success'
       tentative = overallStatus is 'success'
-      @world.endWorld victory, mostEagerGoal.worldEndsAfter, tentative if mostEagerGoal isnt Infinity
+      @world?.endWorld victory, mostEagerGoal.worldEndsAfter, tentative if mostEagerGoal isnt Infinity
 
   goalIsPositive: (goalID) ->
     # Positive goals are completed when all conditions are true (kill all these thangs)

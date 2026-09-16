@@ -1,4 +1,28 @@
 CocoClass = require 'core/CocoClass'
+createjs = require 'lib/createjs-parts'
+
+# Default parameters are using short name (char)
+DEFAULT_STYLE_CHAR = {dialogue: 'D', say: 'S', name: 'N', variable: 'V', text: 'T', editor: 'E'}
+DEFAULT_LABEL_OPTIONS  = {
+  marginX: {D: 5, S: 6, N: 3, V: 0, T: 0, E: 0},
+  marginY: {D: 6, S: 4, N: 3, V: 0, T: 0, E: 0},
+  fontWeight: {D: 'bold', S: 'bold', N: 'bold', V: 'bold', T: 'bold', E: 'regular'},
+  shadow: {D: false, S: true, N: true, V: true, T: false, E: false},
+  shadowColor: {D: '#FFF', S: '#000', N: '#000', V: "#000", T: "#FFF", E: '#000'},
+  fontSize: {D: 25, S: 12, N: 24, V: 18, T: 20, E: 8},
+  lineSpacing: {D: 2, S: 2, N: 2, V: 2, T: 2, E: 2},
+  fontFamily: {D: 'Arial', S: 'Arial', N: 'Arial', B: 'Arial', V: 'Arial', T: 'Arial', E: 'Arial'},
+  textAlign: {D: 'left', S: 'left', N: 'left', B: 'left', V: 'left', T: 'left', E: 'left'},
+  fontColor: {D: '#000', S: '#FFF', N: '#6c6', V: '#fff', T: '#000', E: '#6c6'},
+  backgroundFillColor: {D: 'white', S: 'rgba(0,0,0,0.4)', N: 'rgba(0,0,0,0.7)', V: 'rgba(0,0,0,0.7)', T: 'rgba(0,0,0,0)', E: 'rgba(0,0,0,0.8)'},
+  backgroundStrokeColor: {D: 'black', S: 'rgba(0,0,0,0.6)', N: 'rgba(0,0,0,0)', V: 'rgba(0,0,0,0)', T: 'rgba(0,0,0,0)', E: 'rgba(0,0,0,0)'},
+  backgroundStrokeStyle: {D: 2, S: 1, N: 1, V: 1, T: 0, E: 0},
+  backgroundBorderRadius: {D: 10, S: 3, N: 3, V: 3, T: 0, E: 1},
+  layerPriority: {D: 10, S: 5, N: 5, V: 5, T: 10, E: 5},
+  maxWidth: {D: 300, S: 300, N: 180, V: 100, T: 100, E: 100},
+  maxLength: {D: 100, S: 100, N: 30, V: 30, T: 100, E: 50}
+}
+
 
 module.exports = class Label extends CocoClass
   @STYLE_DIALOGUE = 'dialogue'  # A speech bubble from a script
@@ -6,6 +30,11 @@ module.exports = class Label extends CocoClass
   @STYLE_NAME = 'name'  # A name like Scott set up for the Wizard
   # We might want to combine 'say' and 'name'; they're very similar
   # Nick designed 'say' based off of Scott's 'name' back when they were using two systems
+  @STYLE_VAR = 'variable'
+  @STYLE_TEXT = 'text' # "Direct" label on the sprite pos without following screen caps
+  @STYLE_EDITOR = 'editor' # Like STYLE_NAME, but smaller, for use in level editor
+
+  @BITMAP_SPACE = 20 # Size extenstion for speech bubbles for box pointers
 
   subscriptions: {}
 
@@ -16,6 +45,8 @@ module.exports = class Label extends CocoClass
     @camera = options.camera
     @layer = options.layer
     @style = options.style ? (@sprite?.thang?.labelStyle || Label.STYLE_SAY)
+    @labelOptions = options.labelOptions ? {}
+    @returnBounds = @labelOptions.returnBounds
     console.error @toString(), 'needs a sprite.' unless @sprite
     console.error @toString(), 'needs a camera.' unless @camera
     console.error @toString(), 'needs a layer.' unless @layer
@@ -36,71 +67,72 @@ module.exports = class Label extends CocoClass
 
   build: ->
     if @layer and not @layer.destroyed
-      @layer.removeChild @background if @background
-      @layer.removeChild @label if @label
+      @layer.removeLabel @ if @background or @label
     @label = null
     @background = null
     return unless @text  # null or '' should both be skipped
     o = @buildLabelOptions()
-    @layer.addChild @label = @buildLabel o
-    @layer.addChild @background = @buildBackground o
-    @layer.updateLayerOrder()
+    @label = @buildLabel o
+    @background = @buildBackground o
+    @layer.addLabel @
 
   update: ->
     return unless @text and @sprite.sprite
-    offset = @sprite.getOffset? (if @style in ['dialogue', 'say'] then 'mouth' else 'aboveHead')
-    offset ?= x: 0, y: 0  # temp (if not Lank)
+    offset = {x: 0, y: 0}  # default and for Label.STYLE_TEXT
+    if @sprite.getOffset
+      offset = @sprite.getOffset(if @style in [Label.STYLE_DIALOGUE, Label.STYLE_SAY] then 'mouth' else 'aboveHead')
+    offset.y += 10 if @style is Label.STYLE_VAR
     rotation = @sprite.getRotation()
     offset.x *= -1 if rotation >= 135 or rotation <= -135
     @label.x = @background.x = @sprite.sprite.x + offset.x
     @label.y = @background.y = @sprite.sprite.y + offset.y
+    if @returnBounds and @background.bitmapCache and @sprite?.options?.camera
+      cache = @background.bitmapCache
+      camera = @sprite.options.camera
+      width = (@background.bitmapCache.width - Label.BITMAP_SPACE) * @background.scaleX
+      height = (@background.bitmapCache.height - Label.BITMAP_SPACE) * @background.scaleY
+      x = @background.x - @background.regX * @background.scaleX
+      y = @background.y - @background.regY * @background.scaleY
+      posLB = camera.surfaceToWorld({x: x, y: y + height})
+      posRT = camera.surfaceToWorld({x: x + width, y: y})
+      @sprite.thang?.labelBounds = {x1: posLB.x, x2: posRT.x, y1: posLB.y, y2: posRT.y}
     null
 
   show: ->
     return unless @label
-    @layer.addChild @label
-    @layer.addChild @background
+    @layer.addLabel @
     @layer.updateLayerOrder()
 
   hide: ->
     return unless @label
-    @layer.removeChild @background
-    @layer.removeChild @label
+    @layer.removeLabel @
 
   buildLabelOptions: ->
     o = {}
-    st = {dialogue: 'D', say: 'S', name: 'N'}[@style]
-    o.marginX = {D: 5, S: 6, N: 3}[st]
-    o.marginY = {D: 6, S: 4, N: 3}[st]
-    o.fontWeight = {D: 'bold', S: 'bold', N: 'bold'}[st]
-    o.shadow = {D: false, S: true, N: true}[st]
-    o.shadowColor = {D: '#FFF', S: '#000', N: '#FFF'}[st]
-    o.fontSize = {D: 25, S: 12, N: 24}[st]
-    fontFamily = {D: 'Arial', S: 'Arial', N: 'Arial'}[st]
-    o.fontDescriptor = "#{o.fontWeight} #{o.fontSize}px #{fontFamily}"
-    o.fontColor = {D: '#000', S: '#FFF', N: '#0a0'}[st]
-    if @style is 'name' and @sprite?.thang?.team is 'humans'
-      o.fontColor = '#a00'
-    else if @style is 'name' and @sprite?.thang?.team is 'ogres'
-      o.fontColor = '#00a'
-    o.backgroundFillColor = {D: 'white', S: 'rgba(0,0,0,0.4)', N: 'rgba(255,255,255,0.5)'}[st]
-    o.backgroundStrokeColor = {D: 'black', S: 'rgba(0,0,0,0.6)', N: 'rgba(0,0,0,0)'}[st]
-    o.backgroundStrokeStyle = {D: 2, S: 1, N: 1}[st]
-    o.backgroundBorderRadius = {D: 10, S: 3, N: 3}[st]
-    o.layerPriority = {D: 10, S: 5, N: 5}[st]
-    maxWidth = {D: 300, S: 300, N: 180}[st]
-    maxWidth = Math.max @camera.canvasWidth / 2 - 100, maxWidth  # Does this do anything?
-    maxLength = {D: 100, S: 100, N: 30}[st]
-    multiline = @addNewLinesToText _.string.prune(@text, maxLength), o.fontDescriptor, maxWidth
+    st = DEFAULT_STYLE_CHAR[@style]
+    for prop, styleValues of DEFAULT_LABEL_OPTIONS
+      o[prop] = styleValues[st]
+    if @style isnt Label.STYLE_TEXT
+      # 'text' is only non limited
+      o.maxWidth = Math.max(@camera.canvasWidth / 2 - 100, o.maxWidth)
+    if (@style in [Label.STYLE_NAME, Label.STYLE_EDITOR]) and @sprite?.thang?.team is 'humans'
+      o.fontColor = '#c66'
+    else if (@style in [Label.STYLE_NAME, Label.STYLE_EDITOR]) and @sprite?.thang?.team is 'ogres'
+      o.fontColor = '#66c'
+    # We allow to override options from thang.sayLabelOptions
+    o = _.merge(o, @labelOptions)
+    o.fontDescriptor = "#{o.fontWeight} #{o.fontSize}px #{o.fontFamily}"
+    multiline = @addNewLinesToText _.string.prune(@text, o.maxLength), o.fontDescriptor, o.maxWidth
     o.text = multiline.text
     o.textWidth = multiline.textWidth
     o
 
   buildLabel: (o) ->
     label = new createjs.Text o.text, o.fontDescriptor, o.fontColor
-    label.lineHeight = o.fontSize + 2
+    label.lineHeight = o.fontSize + o.lineSpacing
     label.x = o.marginX
     label.y = o.marginY
+    label.textAlign = o.textAlign
     label.shadow = new createjs.Shadow o.shadowColor, 1, 1, 0 if o.shadow
     label.layerPriority = o.layerPriority
     label.name = "Sprite Label - #{@style}"
@@ -121,18 +153,18 @@ module.exports = class Label extends CocoClass
     g.beginStroke o.backgroundStrokeColor
     g.setStrokeStyle o.backgroundStrokeStyle
 
-    if @style is 'dialogue'
-      radius = o.backgroundBorderRadius  # Rounded rectangle border radius
-      pointerHeight = 10  # Height of pointer triangle
-      pointerWidth = 8  # Actual width of pointer triangle
-      pointerWidth += radius  # Convenience value including pointer width and border radius
+    radius = o.backgroundBorderRadius  # Rounded rectangle border radius
+    pointerHeight = 10  # Height of pointer triangle
+    pointerWidth = 8  # Actual width of pointer triangle
+    pointerWidth += radius  # Convenience value including pointer width and border radius
 
+    if @style is 'dialogue' and not o.withoutPointer
       # Figure out the position of the pointer for the bubble
       sup = x: @sprite.sprite.x, y: @sprite.sprite.y  # a little more accurate to aim for mouth--how?
       cap = @camera.surfaceToCanvas sup
-      hPos = if cap.x / @camera.canvasWidth > 0.53 then 'right' else 'left'
-      vPos = if cap.y / @camera.canvasHeight > 0.53 then 'bottom' else 'top'
-      pointerPos = "#{vPos}-#{hPos}"
+      o.hPos = if cap.x / @camera.canvasWidth > 0.53 then 'right' else 'left'
+      o.vPos = if cap.y / @camera.canvasHeight > 0.53 then 'bottom' else 'top'
+      pointerPos = "#{o.vPos}-#{o.hPos}"
       # TODO: we should redo this when the Thang moves enough, not just when we change its text
       #return if pointerPos is @lastBubblePos and blurb is @lastBlurb
 
@@ -163,20 +195,42 @@ module.exports = class Label extends CocoClass
       g.quadraticCurveTo(0, h, 0, h - radius)
       g.lineTo(0, radius)
       g.quadraticCurveTo(0, 0, radius, 0)
-
-      # Center the container where the mouth of the speaker will be
-      background.regX = if hPos is 'left' then 3 else o.textWidth + 3
-      background.regY = if vPos is 'bottom' then h + pointerHeight else -pointerHeight
-
     else
       # Just draw a rounded rectangle
-      background.regX = w / 2
-      background.regY = h + 2  # Just above health bar, say
+      o.hPos ?= "middle"
+      o.vPos ?= "middle"
+      pointerHeight = 0
       g.drawRoundRect(o.label.x - o.marginX, o.label.y - o.marginY, w, h, o.backgroundBorderRadius)
+
+    background.regX = w / 2
+    background.regY = h + 2  # Just above health bar, say
+
+    # Center the container where the mouth of the speaker will be
+    if o.hPos is "left"
+      background.regX = 3
+    else if o.hPos is "right"
+      background.regX = o.textWidth + 3
+    if o.vPos is "bottom"
+      background.regY = h + pointerHeight
+    else if o.vPos is "top"
+      background.regY = -pointerHeight
+
+    if @style is Label.STYLE_TEXT
+      if o.hPos is 'left'
+        background.regX = 0
+      else if o.hPos is 'right'
+        background.regX = o.textWidth
+      background.regY = h / 2
+      if o.vPos is "bottom"
+        background.regY = h
+      else if o.vPos is "top"
+        background.regY = 0
 
     o.label.regX = background.regX - o.marginX
     o.label.regY = background.regY - o.marginY
-    background.cache(-10, -10, w+20, h+20) # give a wide berth for speech box pointers
+    space = Label.BITMAP_SPACE
+    offset = -1 * space / 2
+    background.cache(offset, offset, w + space, h + space)
 
     g.endStroke()
     g.endFill()

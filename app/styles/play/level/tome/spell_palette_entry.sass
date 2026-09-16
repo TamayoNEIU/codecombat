@@ -1,9 +1,29 @@
 @import "app/styles/mixins"
 @import "app/styles/bootstrap/variables"
+@import "app/styles/play/variables"
 
 #level-view.hero .spell-palette-entry-view
   // Not clickable.
   cursor: default
+
+#spell-palette-view-mid .spell-palette-entry-view
+  margin-left: 38px
+  width: 174px
+  width: calc(100% - 38px)
+
+  span
+    cursor: pointer
+    user-select: none
+
+  &:hover
+    color: #f3cd90
+
+  &.selected
+    color: white
+
+#spell-palette-view .spell-palette-entry-view
+  margin: 0 1vw 0 0
+  min-width: 10vw
 
 .spell-palette-entry-view
   display: block
@@ -19,14 +39,18 @@
   white-space: nowrap
 
   &:hover
-    border: 1px solid #000000
+    border: 1px solid #f3cd90
 
   &.pinned
-    background-color: darken(#FFFFFF, 25%)
+    background-color: #26478a
 
   &.single-entry
     height: 38px
     line-height: 38px
+
+  img.spawnable-image
+    height: 16px
+    margin-right: 4px
 
   // Originally pulled these colors from the most relevant textmate-theme classes, but then fudged them a lot.
   //&.function
@@ -45,23 +69,31 @@
   //  color: rgb(197, 6, 11)
   color: rgb(243, 169, 49)
 
-
-body:not(.dialogue-view-active)
-  .spell-palette-popover.popover
-    right: 45%
-    min-width: 500px
-    margin-top: -17%
+  body[lang="he"] &, body[lang="ar"] &, body[lang="fa"] &, body[lang="ur"] &
+    .rtl-right-aligned
+      text-align: right
 
 .spell-palette-popover.popover
-  // Only those popovers which are our direct children (spell documentation)
+  top: 80px
+  min-width: 500px
+
+.spell-palette-popover.popover, .blocklyTooltipDiv
   max-width: 600px
   padding: 0
   border-style: solid
   border-image: url(/images/level/popover_border_background.png) 16 12 fill round
   border-width: 16px 12px
   @include box-shadow(0 0 0 #000)
-  // Prevent flickering in weird scenarios where popover goes over its own property
-  pointer-events: none
+
+  //Fixes punctuation but puts comment marker on right, which is apparently worse.
+  //body[lang="he"] &, body[lang="ar"] &, body[lang="fa"] &, body[lang="ur"] &
+  //  .ace_text-layer .ace_comment
+  //    direction: rtl
+  //    unicode-bidi: embed
+
+  body[lang="he"] &, body[lang="ar"] &, body[lang="fa"] &, body[lang="ur"] &
+    .rtl-right-aligned
+      text-align: right
 
   // Jiggle animation
   // TODO: consolidate with problem_alert.sass jiggle
@@ -81,23 +113,15 @@ body:not(.dialogue-view-active)
     @include animation(jiggle .3s infinite)
 
   &.pinned
-    left: auto !important
-    top: 50px !important
-    right: 45%
-    // bottom: 151px
     @include user-select(text)
-    // Wish I could set max-width and max-height (and override Bootstrap's stuff)
-    // but without explicitly setting height, child overflow-y: scroll doesn't work
-    min-width: 45%
-    height: 60%
 
     .arrow
       display: none
 
     .close
       position: absolute
-      top: 5%
-      right: 5%
+      top: -7px
+      right: 2px
       font-size: 28px
       font-weight: bold
       @include opacity(0.6)
@@ -109,6 +133,9 @@ body:not(.dialogue-view-active)
   h1:not(.not-code), h2:not(.not-code), h3:not(.not-code), h4:not(.not-code), h5:not(.not-code), h6:not(.not-code)
     font-family: Monaco, Menlo, Ubuntu Mono, Consolas, "source-code-pro", monospace !important
     font-variant: normal
+
+    body[lang="he"] &, body[lang="ar"] &, body[lang="fa"] &, body[lang="ur"] &
+      font-family: "Cousine", "Courier", "Courier New", monospace !important
 
   .popover-title
     background-color: transparent
@@ -122,6 +149,10 @@ body:not(.dialogue-view-active)
     margin-right: 10px
     img
       float: right
+
+    img:first-child
+      max-width: 100px
+      margin-top: -30px
 
   &.top .arrow
     bottom: -2%
@@ -141,6 +172,9 @@ body:not(.dialogue-view-active)
       font-size: 12px
       font-family: Monaco, Menlo, Ubuntu Mono, Consolas, "source-code-pro", monospace !important
 
+    body[lang="he"] &, body[lang="ar"] &, body[lang="fa"] &, body[lang="ur"] &
+      font-family: "Cousine", "Courier", "Courier New", monospace !important
+
     .docs-ace
       .ace_cursor, .ace_bracket
         display: none
@@ -150,18 +184,13 @@ body:not(.dialogue-view-active)
     font-family: Monaco, Menlo, Ubuntu Mono, Consolas, "source-code-pro", monospace !important
     font-size: 12px
 
-html.no-borderimage
-  .spell-palette-popover.popover
-    background: transparent url(/images/level/popover_background.png)
-    background-size: 100% 100%
-    border: 0
+    body[lang="he"] &, body[lang="ar"] &, body[lang="fa"] &, body[lang="ur"] &
+      font-family: "Cousine", "Courier", "Courier New", monospace !important
 
-html.fullscreen-editor
-  .spell-palette-popover.popover.pinned
-    min-width: 600px
-    bottom: inherit
-    right: 50%
-    margin-right: -300px
+.blocklyTooltipDiv
+  .docs-ace-container
+    &, .docs-ace
+      white-space: pre-wrap
 
 // iPad property docs
 

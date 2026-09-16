@@ -20,6 +20,9 @@ Thumbs.db
 .#*
 *#
 
+#Emacs - CTAGS
+TAGS
+
 # Vim
 .*.sw[a-z]
 *.un~i
@@ -62,6 +65,8 @@ tmp/
 
 # Brunch output
 public/
+public_coco/
+public_ozar/
 
 # Redis?
 dump.rdb
@@ -93,8 +98,35 @@ login.coffee
 npm-debug.log*
 
 temp/
-Dockerfile
+./Dockerfile
 ### If you add something here, copy it to the end of .npmignore, too. ###
 
 # Visual Studio Code
 .vscode/
+
+# editorconfig (might be standardized eventually)
+.editorconfig
+
+# coffeelint for editors (might be standardized eventually)
+coffeelint.json
+gitSpy/*
+
+# nightwatch reports
+spec/smoke/reports/
+
+scripts/analytics/mongodb/.analyticsAuth.json
+scripts/analytics/mongodb/.mainAuth.json
+
+# Created by git LFS
+.gitattributes
+
+# Build info file served by the production server
+.build_info.json
+
+.lighthouseci
+
+# Local VSCode history
+.history
+
+# Storybook build output
+storybook-static/

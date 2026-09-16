@@ -1,4 +1,7 @@
 CocoClass = require 'core/CocoClass'
+GameUIState = require 'models/GameUIState'
+createjs = require 'lib/createjs-parts'
+utils = require 'core/utils'
 
 # If I were the kind of math major who remembered his math, this would all be done with matrix transforms.
 
@@ -6,7 +9,7 @@ r2d = (radians) -> radians * 180 / Math.PI
 d2r = (degrees) -> degrees / 180 * Math.PI
 
 MAX_ZOOM = 8
-MIN_ZOOM = 0.1
+MIN_ZOOM = 0.25
 DEFAULT_ZOOM = 2.0
 DEFAULT_TARGET = {x: 0, y: 0}
 DEFAULT_TIME = 1000
@@ -40,16 +43,27 @@ module.exports = class Camera extends CocoClass
   # INIT
 
   subscriptions:
-    'camera:zoom-in': 'onZoomIn'
-    'camera:zoom-out': 'onZoomOut'
-    'camera:zoom-to': 'onZoomTo'
-    'level:restarted': 'onLevelRestarted'
-    'surface:mouse-scrolled': 'onMouseScrolled'
-    'sprite:mouse-down': 'onMouseDown'
-    'sprite:dragged': 'onMouseDragged'
+    Object.assign(
+      {
+        'camera:zoom-to': 'onZoomTo'
+        'level:restarted': 'onLevelRestarted'
+      },
+      if utils.isCodeCombat then {
+        'camera:zoom-out': 'onZoomOut'
+        'camera:zoom-in': 'onZoomIn'
+      } else {}
+    )
 
-  constructor: (@canvas, angle=Math.asin(0.75), hFOV=d2r(30)) ->
+  constructor: (@canvas, @options={}) ->
+    angle=Math.asin(0.75)
+    hFOV=d2r(30)
     super()
+    @gameUIState = @options.gameUIState or new GameUIState()
+    @listenTo @gameUIState, 'surface:stage-mouse-move', @onMouseMove
+    @listenTo @gameUIState, 'surface:stage-mouse-down', @onMouseDown
+    @listenTo @gameUIState, 'surface:stage-mouse-up', @onMouseUp
+    @listenTo @gameUIState, 'surface:mouse-scrolled', @onMouseScrolled
+    @handleEvents = @options.handleEvents ? true
     @canvasWidth = parseInt(@canvas.attr('width'), 10)
     @canvasHeight = parseInt(@canvas.attr('height'), 10)
     @offset = {x: 0, y: 0}
@@ -155,8 +169,27 @@ module.exports = class Camera extends CocoClass
 
   onZoomIn: (e) -> @zoomTo @target, @zoom * 1.15, 300
   onZoomOut: (e) -> @zoomTo @target, @zoom / 1.15, 300
+
+  onMouseDown: (e) ->
+    return if @dragDisabled
+    @lastPos = {x: e.originalEvent.rawX, y: e.originalEvent.rawY}
+    @mousePressed = true
+
+  onMouseMove: (e) ->
+    return unless @mousePressed and @gameUIState.get('canDragCamera')
+    return if @dragDisabled
+    target = @boundTarget(@target, @zoom)
+    newPos =
+      x: target.x + (@lastPos.x - e.originalEvent.rawX) / @zoom
+      y: target.y + (@lastPos.y - e.originalEvent.rawY) / @zoom
+    @zoomTo newPos, @zoom, 0
+    @lastPos = {x: e.originalEvent.rawX, y: e.originalEvent.rawY}
+    Backbone.Mediator.publish 'camera:dragged', {}
+
+  onMouseUp: (e) ->
+    @mousePressed = false
+
   onMouseScrolled: (e) ->
-    return unless e.canvas is @canvas
     ratio = 1 + 0.05 * Math.sqrt(Math.abs(e.deltaY))
     ratio = 1 / ratio if e.deltaY > 0
     newZoom = @zoom * ratio
@@ -173,22 +206,6 @@ module.exports = class Camera extends CocoClass
     else
       target = @target
     @zoomTo target, newZoom, 0
-
-  onMouseDown: (e) ->
-    return unless e.canvas is @canvas[0]
-    return if @dragDisabled
-    @lastPos = {x: e.originalEvent.rawX, y: e.originalEvent.rawY}
-
-  onMouseDragged: (e) ->
-    return unless e.canvas is @canvas[0]
-    return if @dragDisabled
-    target = @boundTarget(@target, @zoom)
-    newPos =
-      x: target.x + (@lastPos.x - e.originalEvent.rawX) / @zoom
-      y: target.y + (@lastPos.y - e.originalEvent.rawY) / @zoom
-    @zoomTo newPos, @zoom, 0
-    @lastPos = {x: e.originalEvent.rawX, y: e.originalEvent.rawY}
-    Backbone.Mediator.publish 'camera:dragged', {}
 
   onLevelRestarted: ->
     @setBounds(@firstBounds, false)

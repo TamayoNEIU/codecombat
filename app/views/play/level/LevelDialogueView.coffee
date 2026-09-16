@@ -1,6 +1,8 @@
+require('app/styles/play/level/level-dialogue-view.sass')
 CocoView = require 'views/core/CocoView'
-template = require 'templates/play/level/level-dialogue-view'
+template = require 'app/templates/play/level/level-dialogue-view'
 DialogueAnimator = require './DialogueAnimator'
+PlayItemsModal = require 'views/play/modal/PlayItemsModal'
 
 module.exports = class LevelDialogueView extends CocoView
   id: 'level-dialogue-view'
@@ -12,6 +14,7 @@ module.exports = class LevelDialogueView extends CocoView
     'level:shift-space-pressed': 'onShiftSpacePressed'
     'level:escape-pressed': 'onEscapePressed'
     'sprite:dialogue-sound-completed': 'onDialogueSoundCompleted'
+    'level:open-items-modal': 'openItemsModal'
 
   events:
     'click': 'onClick'
@@ -28,9 +31,11 @@ module.exports = class LevelDialogueView extends CocoView
   onClickLink: (e) ->
     route = $(e.target).attr('href')
     if route and /item-store/.test route
-      PlayItemsModal = require 'views/play/modal/PlayItemsModal'
       @openModalView new PlayItemsModal supermodel: @supermodal
       e.stopPropagation()
+
+  openItemsModal: (e) ->
+    @openModalView new PlayItemsModal supermodel: @supermodal
 
   onSpriteDialogue: (e) ->
     return unless e.message
@@ -38,14 +43,13 @@ module.exports = class LevelDialogueView extends CocoView
     $('body').addClass('dialogue-view-active')
     @setMessage e.message, e.mood, e.responses
 
-    window.tracker?.trackEvent 'Heard Sprite', {message: e.message, label: e.message, ls: @sessionID}
-
   onDialogueSoundCompleted: ->
     @$el.removeClass 'speaking'
 
   onSpriteClearDialogue: ->
     @$el.removeClass 'active speaking'
     $('body').removeClass('dialogue-view-active')
+    @$el.removeClass(@lastMood) if @lastMood
 
   setMessage: (message, mood, responses) ->
     message = marked message
@@ -53,10 +57,11 @@ module.exports = class LevelDialogueView extends CocoView
     message = message.replace /&lt;i class=&#39;(.+?)&#39;&gt;&lt;\/i&gt;/, "<i class='$1'></i>"
     clearInterval(@messageInterval) if @messageInterval
     @bubble = $('.dialogue-bubble', @$el)
-    @bubble.removeClass(@lastMood) if @lastMood
+    @$el.removeClass(@lastMood) if @lastMood
+    @$el.addClass(mood)
     @lastMood = mood
     @bubble.text('')
-    group = $('<div class="enter secret"></div>')
+    group = $('<div class="enter secret" dir="ltr"></div>')
     @bubble.append(group)
     if responses
       @lastResponses = responses

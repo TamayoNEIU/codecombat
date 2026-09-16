@@ -10,7 +10,6 @@ Letterbox = require './Letterbox'
 Dimmer = require './Dimmer'
 CountdownScreen = require './CountdownScreen'
 PlaybackOverScreen = require './PlaybackOverScreen'
-WaitingScreen = require './WaitingScreen'
 DebugDisplay = require './DebugDisplay'
 CoordinateDisplay = require './CoordinateDisplay'
 CoordinateGrid = require './CoordinateGrid'
@@ -18,8 +17,13 @@ LankBoss = require './LankBoss'
 PointChooser = require './PointChooser'
 RegionChooser = require './RegionChooser'
 MusicPlayer = require './MusicPlayer'
+GameUIState = require 'models/GameUIState'
+createjs = require 'lib/createjs-parts'
+require 'jquery-mousewheel'
+store = require 'app/core/store'
+utils = require 'core/utils'
 
-resizeDelay = 500  # At least as much as $level-resize-transition-time.
+resizeDelay = 1  # At least as much as $level-resize-transition-time.
 
 module.exports = Surface = class Surface extends CocoClass
   stage: null
@@ -52,6 +56,7 @@ module.exports = Surface = class Surface extends CocoClass
     showInvisible: false
     frameRate: 30  # Best as a divisor of 60, like 15, 30, 60, with RAF_SYNCHED timing.
     levelType: 'hero'
+    resizeStrategy: 'default'
 
   subscriptions:
     'level:disable-controls': 'onDisableControls'
@@ -69,10 +74,13 @@ module.exports = Surface = class Surface extends CocoClass
     'level:set-letterbox': 'onSetLetterbox'
     'application:idle-changed': 'onIdleChanged'
     'camera:zoom-updated': 'onZoomUpdated'
-    'playback:real-time-playback-waiting': 'onRealTimePlaybackWaiting'
     'playback:real-time-playback-started': 'onRealTimePlaybackStarted'
     'playback:real-time-playback-ended': 'onRealTimePlaybackEnded'
+    'playback:cinematic-playback-started': 'onCinematicPlaybackStarted'
+    'playback:cinematic-playback-ended': 'onCinematicPlaybackEnded'
     'level:flag-color-selected': 'onFlagColorSelected'
+    'tome:manual-cast': 'onManualCast'
+    'playback:stop-real-time-playback': 'onStopRealTimePlayback'
 
   shortcuts:
     'ctrl+\\, ⌘+\\': 'onToggleDebug'
@@ -84,21 +92,35 @@ module.exports = Surface = class Surface extends CocoClass
 
   constructor: (@world, @normalCanvas, @webGLCanvas, givenOptions) ->
     super()
+    $(window).on('keydown', @onKeyEvent)
+    $(window).on('keyup', @onKeyEvent)
     @normalLayers = []
     @options = _.clone(@defaults)
     @options = _.extend(@options, givenOptions) if givenOptions
+    @handleEvents = @options.handleEvents ? true
+    @zoomToHero = if @world.preventZoomToHero then false else @options.levelType isnt "game-dev" # In game-dev levels the hero is gameReferee
+    @gameUIState = @options.gameUIState or new GameUIState({
+      canDragCamera: true
+    })
+    @realTimeInputEvents = @gameUIState.get('realTimeInputEvents')
+    @listenTo(@gameUIState, 'sprite:mouse-down', @onSpriteMouseDown)
+    if @world.trackMouseMove # This is defined as a parameter of Systems.UI and setup there for a level
+      @listenTo(@gameUIState, 'surface:stage-mouse-move', @onWorldMouseMove)
+    @onResize = _.debounce @onResize, resizeDelay
     @initEasel()
     @initAudio()
-    @onResize = _.debounce @onResize, resizeDelay
+    @pathLayerAdapter = @lankBoss.layerAdapters['Path']
+    @listenTo(@pathLayerAdapter, 'new-spritesheet', @updatePaths)
     $(window).on 'resize', @onResize
     if @world.ended
       _.defer => @setWorld @world
 
   initEasel: ->
     @normalStage = new createjs.Stage(@normalCanvas[0])
-    @webGLStage = new createjs.SpriteStage(@webGLCanvas[0])
+    @webGLStage = new createjs.StageGL(@webGLCanvas[0])
     @normalStage.nextStage = @webGLStage
-    @camera = new Camera @webGLCanvas
+    @camera = new Camera(@webGLCanvas, { @gameUIState, @handleEvents })
+    @camera.dragDisabled = @world.cameraDragDisabled # This is defined as a parameter of Systems.UI and setup there for a level
     AudioPlayer.camera = @camera unless @options.choosing
 
     @normalLayers.push @surfaceTextLayer = new Layer name: 'Surface Text', layerPriority: 1, transform: Layer.TRANSFORM_SURFACE_TEXT, camera: @camera
@@ -112,27 +134,47 @@ module.exports = Surface = class Surface extends CocoClass
     canvasHeight = parseInt @normalCanvas.attr('height'), 10
     @screenLayer.addChild new Letterbox canvasWidth: canvasWidth, canvasHeight: canvasHeight
 
-    @lankBoss = new LankBoss camera: @camera, webGLStage: @webGLStage, surfaceTextLayer: @surfaceTextLayer, world: @world, thangTypes: @options.thangTypes, choosing: @options.choosing, navigateToSelection: @options.navigateToSelection, showInvisible: @options.showInvisible, playerNames: if @options.levelType is 'course-ladder' then @options.playerNames else null
+    @lankBoss = new LankBoss({
+      @camera
+      @webGLStage
+      @surfaceTextLayer
+      @world
+      thangTypes: @options.thangTypes
+      choosing: @options.choosing
+      navigateToSelection: @options.navigateToSelection
+      showInvisible: @options.showInvisible
+      playerNames: if @options.levelType in ['course-ladder', 'ladder'] then @options.playerNames else null
+      @gameUIState
+      @handleEvents
+    })
     @countdownScreen = new CountdownScreen camera: @camera, layer: @screenLayer, showsCountdown: @world.showsCountdown
-    @playbackOverScreen = new PlaybackOverScreen camera: @camera, layer: @screenLayer, playerNames: @options.playerNames
-    @normalStage.addChildAt @playbackOverScreen.dimLayer, 0  # Put this below the other layers, actually, so we can more easily read text on the screen.
-    @waitingScreen = new WaitingScreen camera: @camera, layer: @screenLayer
+    if @options.levelType in ['ladder', 'hero-ladder', 'course-ladder']
+      @playbackOverScreen = new PlaybackOverScreen camera: @camera, layer: @screenLayer, playerNames: @options.playerNames
+      @normalStage.addChildAt @playbackOverScreen.dimLayer, 0  # Put this below the other layers, actually, so we can more easily read text on the screen.
     @initCoordinates()
     @webGLStage.enableMouseOver(10)
     @webGLStage.addEventListener 'stagemousemove', @onMouseMove
     @webGLStage.addEventListener 'stagemousedown', @onMouseDown
-    @webGLCanvas[0].addEventListener 'mouseup', @onMouseUp
+    @webGLStage.addEventListener 'stagemouseup', @onMouseUp
     @webGLCanvas.on 'mousewheel', @onMouseWheel
     @hookUpChooseControls() if @options.choosing # TODO: figure this stuff out
     createjs.Ticker.timingMode = createjs.Ticker.RAF_SYNCHED
-    createjs.Ticker.setFPS @options.frameRate
+    createjs.Ticker.framerate = @options.frameRate
     @onResize()
 
   initCoordinates: ->
-    @coordinateGrid ?= new CoordinateGrid {camera: @camera, layer: @gridLayer, textLayer: @surfaceTextLayer}, @world.size()
+    gridOptions = {camera: @camera, layer: @gridLayer, textLayer: @surfaceTextLayer}
+    if @options.level?.get('product', true) is 'codecombat-junior'
+      gridOptions.resolution = 8
+      gridOptions.gridOffset = {x: 2, y: 2}
+      gridOptions.hideAxisLabels = true
+      gridOptions.alpha = 0.5
+    @coordinateGrid ?= new CoordinateGrid gridOptions, @world.size()
     @coordinateGrid.showGrid() if @world.showGrid or @options.grid
-    showCoordinates = if @options.coords? then @options.coords else @world.showCoordinates
-    @coordinateDisplay ?= new CoordinateDisplay camera: @camera, layer: @surfaceTextLayer if showCoordinates
+    @showCoordinates = if @options.coords? then @options.coords else @world.showCoordinates
+    if @showCoordinates
+      coordinateOptions = if @options.showInvisible then {} else @world.showCoordinatesOptions
+      @coordinateDisplay ?= new CoordinateDisplay camera: @camera, layer: @surfaceTextLayer, displayOptions: coordinateOptions
 
   hookUpChooseControls: ->
     chooserOptions = stage: @webGLStage, surfaceLayer: @surfaceTextLayer, camera: @camera, restrictRatio: @options.choosing is 'ratio-region'
@@ -140,9 +182,8 @@ module.exports = Surface = class Surface extends CocoClass
     @chooser = new klass chooserOptions
 
   initAudio: ->
+    return if utils.isOzaria  # Ozaria uses a different sound system
     @musicPlayer = new MusicPlayer()
-
-
 
   #- Setting the world
 
@@ -158,11 +199,33 @@ module.exports = Surface = class Surface extends CocoClass
     return if @destroyed
     return if @loaded
     @loaded = true
-    @lankBoss.createMarks()
+    @lankBoss.createMarks() unless utils.isOzaria
     @updateState true
     @drawCurrentFrame()
     createjs.Ticker.addEventListener 'tick', @tick
     Backbone.Mediator.publish 'level:started', {}
+    @initFrameRate1()
+
+  initFrameRate1: ->
+    return if @options.frameRate < 30  # Level editor and other places use a lower framerate intentionally
+    # Wait a few seconds before starting to measure frame rate, while UI may be blocking during level load
+    @initFrameRateTimeout = _.delay @initFrameRate2, 3000
+
+  initFrameRate2: =>
+    return if @destroyed
+    utils.getScreenRefreshRate @initFrameRate3, false
+
+  initFrameRate3: (refreshRate, samples) =>
+    return if @destroyed
+    # Now that we have a reasonable point estimate for the display's refresh rate, we can set the CreateJS framerate to match
+    cores = window.navigator.hardwareConcurrency or 4  # Safari may not let us get this; default to assuming we can use higher rate
+    return if cores <= 2
+    refreshRates = [30, 60, 75, 90, 120, 144, 240]
+    # Find the largest rate that is less than the display's refresh rate, with a little wiggle room
+    frameRate = Math.max 30, (_.findLast(refreshRates, (rate) -> rate < refreshRate + 4)  ? 30)
+    console.log "Choosing framerate #{frameRate} based on refresh rate #{refreshRate} and #{cores} cores of possible rates #{refreshRates}"
+    @options.frameRate = frameRate
+    createjs.Ticker.framerate = @options.frameRate unless @paused
 
   #- Update loop
 
@@ -179,9 +242,10 @@ module.exports = Surface = class Surface extends CocoClass
       if frameAdvanced and @playing
         advanceBy = @world.frameRate / @options.frameRate
         if @fastForwardingToFrame and @currentFrame < @fastForwardingToFrame - advanceBy
-          advanceBy = Math.min(@currentFrame + advanceBy * @fastForwardingSpeed, @fastForwardingToFrame) - @currentFrame
+          advanceBy = Math.min(@currentFrame + advanceBy * @gameUIState.get('fastForwardingSpeed'), @fastForwardingToFrame) - @currentFrame
         else if @fastForwardingToFrame
-          @fastForwardingToFrame = @fastForwardingSpeed = null
+          @fastForwardingToFrame = null
+          @gameUIState.set 'fastForwardingSpeed', null
         @currentFrame += advanceBy
         @currentFrame = Math.min @currentFrame, lastFrame
       newWorldFrame = Math.floor @currentFrame
@@ -210,8 +274,14 @@ module.exports = Surface = class Surface extends CocoClass
       @mouseIsDown = false
 
   restoreWorldState: ->
+    if @world.synchronous
+      @lankBoss.updateSounds() if parseInt(@currentFrame) isnt parseInt(@lastFrame)
+      return
     frame = @world.getFrame(@getCurrentFrame())
+    return unless frame
     frame.restoreState()
+    @restoreScores frame
+
     current = Math.max(0, Math.min(@currentFrame, @world.frames.length - 1))
     if current - Math.floor(current) > 0.01 and Math.ceil(current) < @world.frames.length - 1
       next = Math.ceil current
@@ -222,8 +292,9 @@ module.exports = Surface = class Surface extends CocoClass
 
   updateState: (frameChanged) ->
     # world state must have been restored in @restoreWorldState
-    if @playing and @currentFrame < @world.frames.length - 1 and @heroLank and not @mouseIsDown and @camera.newTarget isnt @heroLank.sprite and @camera.target isnt @heroLank.sprite
-      @camera.zoomTo @heroLank.sprite, @camera.zoom, 750
+    if @handleEvents
+      if @zoomToHero and @playing and @currentFrame < @world.frames.length - 1 and @heroLank and not @mouseIsDown and @camera.newTarget isnt @heroLank.sprite and @camera.target isnt @heroLank.sprite
+        @camera.zoomTo @heroLank.sprite, @camera.zoom, 750
     @lankBoss.update frameChanged
     @camera.updateZoom()  # Make sure to do this right after the LankBoss updates, not before, so it can properly target sprite positions.
     @dimmer?.setSprites @lankBoss.lanks
@@ -233,6 +304,18 @@ module.exports = Surface = class Surface extends CocoClass
     @normalStage.update e
     @webGLStage.update e
 
+  restoreScores: (frame) ->
+    return unless frame.scores and @options.level
+    scores = []
+    for scoreType in @options.level.get('scoreTypes') ? []
+      scoreType = scoreType.type if scoreType.type
+      if scoreType is 'code-length'
+        score = @world.scores?['code-length']
+      else
+        score = frame.scores[scoreType]
+      if score?
+        scores.push type: scoreType, score: score
+    Backbone.Mediator.publish 'level:scores-updated', scores: scores
 
   #- Setting play/pause and progress
 
@@ -240,11 +323,12 @@ module.exports = Surface = class Surface extends CocoClass
     progress = Math.max(Math.min(progress, 1), 0.0)
 
     @fastForwardingToFrame = null
+    @gameUIState.set 'fastForwardingSpeed', null
     @scrubbing = true
     onTweenEnd = =>
       @scrubbingTo = null
       @scrubbing = false
-      @scrubbingPlaybackSpeed = null
+      @gameUIState.set 'scrubbingPlaybackSpeed', null
 
     if @scrubbingTo?
       # cut to the chase for existing tween
@@ -254,7 +338,7 @@ module.exports = Surface = class Surface extends CocoClass
     @scrubbingTo = Math.round(progress * (@world.frames.length - 1))
     @scrubbingTo = Math.max @scrubbingTo, 1
     @scrubbingTo = Math.min @scrubbingTo, @world.frames.length - 1
-    @scrubbingPlaybackSpeed = Math.sqrt(Math.abs(@scrubbingTo - @currentFrame) * @world.dt / (scrubDuration or 0.5))
+    @gameUIState.set 'scrubbingPlaybackSpeed', Math.sqrt(Math.abs(@scrubbingTo - @currentFrame) * @world.dt / (scrubDuration or 0.5))
     if scrubDuration
       t = createjs.Tween
         .get(@)
@@ -283,7 +367,7 @@ module.exports = Surface = class Surface extends CocoClass
         @currentFrame = tempFrame
         frame = @world.getFrame(@getCurrentFrame())
         frame.restoreState()
-        volume = Math.max(0.05, Math.min(1, 1 / @scrubbingPlaybackSpeed))
+        volume = Math.max(0.05, Math.min(1, 1 / @gameUIState.get('scrubbingPlaybackSpeed')))
         lank.playSounds false, volume for lank in @lankBoss.lankArray
         tempFrame += if rising then 1 else -1
       @currentFrame = actualCurrentFrame
@@ -298,22 +382,24 @@ module.exports = Surface = class Surface extends CocoClass
   setPaused: (paused) ->
     # We want to be able to essentially stop rendering the surface if it doesn't need to animate anything.
     # If pausing, though, we want to give it enough time to finish any tweens.
-    performToggle = =>
-      createjs.Ticker.setFPS if paused then 1 else @options.frameRate
-      @surfacePauseTimeout = null
     clearTimeout @surfacePauseTimeout if @surfacePauseTimeout
     clearTimeout @surfaceZoomPauseTimeout if @surfaceZoomPauseTimeout
+    return if @options.levelType in ['game-dev']
+    return unless @handleEvents  # Don't do this within the level editor
+    performToggle = =>
+      createjs.Ticker.framerate = if paused then 1 else @options.frameRate
+      @surfacePauseTimeout = null
     @surfacePauseTimeout = @surfaceZoomPauseTimeout = null
     if paused
       @surfacePauseTimeout = _.delay performToggle, 2000
       @lankBoss.stop()
       @trailmaster?.stop()
-      @playbackOverScreen.show()
+      @playbackOverScreen?.show() if @ended
     else
       performToggle()
       @lankBoss.play()
       @trailmaster?.play()
-      @playbackOverScreen.hide()
+      @playbackOverScreen?.hide()
 
 
 
@@ -331,11 +417,11 @@ module.exports = Surface = class Surface extends CocoClass
       world: @world
     )
 
-    if @lastFrame < @world.frames.length and @currentFrame >= @world.totalFrames - 1
+    if (not @world.indefiniteLength) and @lastFrame < @world.frames.length and @currentFrame >= @world.totalFrames - 1
+      @updatePaths()  # TODO: this is a hack to make sure paths are on the first time the level loads
       @ended = true
       @setPaused true
       Backbone.Mediator.publish 'surface:playback-ended', {}
-      @updatePaths()  # TODO: this is a hack to make sure paths are on the first time the level loads
     else if @currentFrame < @world.totalFrames and @ended
       @ended = false
       @setPaused false
@@ -371,7 +457,8 @@ module.exports = Surface = class Surface extends CocoClass
       target = null
     @camera.setBounds e.bounds if e.bounds
 #    @cameraBorder.updateBounds @camera.bounds
-    @camera.zoomTo target, e.zoom, e.duration  # TODO: SurfaceScriptModule perhaps shouldn't assign e.zoom if not set
+    if @handleEvents
+      @camera.zoomTo target, e.zoom, e.duration  # TODO: SurfaceScriptModule perhaps shouldn't assign e.zoom if not set
 
   onZoomUpdated: (e) ->
     if @ended
@@ -407,6 +494,7 @@ module.exports = Surface = class Surface extends CocoClass
       @currentFrame = 1  # Go back to the beginning (but not frame 0, that frame is weird)
     if @fastForwardingToFrame and not @playing
       @fastForwardingToFrame = null
+      @gameUIState.set 'fastForwardingSpeed', null
     @updateGrabbability()
 
   onSetTime: (e) ->
@@ -431,7 +519,16 @@ module.exports = Surface = class Surface extends CocoClass
     @setPlayingCalled = false  # Don't overwrite playing settings if they changed by, say, scripts.
     @frameBeforeCast = @currentFrame
     # This is where I wanted to trigger a rewind, but it turned out to be pretty complicated, since the new world gets updated everywhere, and you don't want to rewind through that.
-    @setProgress 0, 0
+    preservePlaybackPosition = @options.level?.get('product') is 'codecombat-junior'
+    if preservePlaybackPosition and e.spellsAreUnchanged
+      # If we are rerunning the same code, we probably want to see what happens instead of just fast-forwarding through the same execution
+      preservePlaybackPosition = false
+      @frameBeforeCast = 0  # Don't fast-forward in this case
+    if preservePlaybackPosition and @world.getThangByID('Hero Placeholder')?.health <= 0
+      # If hero is currently dead, actually go back 3s: 2s before death (since world ends 1s after death)
+      # That way we don't just restart playback from dead hero state at the end and not learn anything
+      @frameBeforeCast = Math.max 0, Math.round(@frameBeforeCast - 3 * @world.frameRate)
+    @setProgress 0, 0 unless preservePlaybackPosition
 
   onNewWorld: (event) ->
     return unless event.world.name is @world.name
@@ -447,19 +544,29 @@ module.exports = Surface = class Surface extends CocoClass
 
     @setWorld event.world
     @onFrameChanged(true)
-    fastForwardBuffer = 2
-    if @playing and not @realTime and (ffToFrame = Math.min(event.firstChangedFrame, @frameBeforeCast, @world.frames.length - 1)) and ffToFrame > @currentFrame + fastForwardBuffer * @world.frameRate
+    fastForwardBuffer = 2  # Don't fast forward in first two seconds
+    fastForwardBuffer = -9001 if @options.level?.get('product') is 'codecombat-junior'  # Unless it's codecombat-junior, which always fast-forwards
+    ffToFrame = Math.min(event.firstChangedFrame, @frameBeforeCast, @world.frames.length - 1)
+    if @playing and not @realTime and ffToFrame > @currentFrame + fastForwardBuffer * @world.frameRate
       @fastForwardingToFrame = ffToFrame
-      @fastForwardingSpeed = Math.max 3, 3 * (@world.maxTotalFrames * @world.dt) / 60
-    else if @realTime
-      lag = (@world.frames.length - 1) * @world.dt - @world.age
-      intendedLag = @world.realTimeBufferMax + @world.dt
-      if lag > intendedLag * 1.2
-        @fastForwardingToFrame = @world.frames.length - @world.realTimeBufferMax * @world.frameRate
-        @fastForwardingSpeed = lag / intendedLag
+      if @cinematic
+        @gameUIState.set 'fastForwardingSpeed', Math.max 1, Math.min(2, (ffToFrame * @world.dt) / 15)
+      else if @options.level?.get('product') is 'codecombat-junior'
+        @gameUIState.set 'fastForwardingSpeed', Math.max 3, 3 * (@world.maxTotalFrames * @world.dt) / 60
+        @setProgress(@fastForwardingToFrame / @world.frames.length, 0)  # Just jump right there, if we can
       else
-        @fastForwardingToFrame = @fastForwardingSpeed = null
-#    console.log "on new world, lag", lag, "intended lag", intendedLag, "fastForwardingToFrame", @fastForwardingToFrame, "speed", @fastForwardingSpeed, "cause we are at", @world.age, "of", @world.frames.length * @world.dt
+        @gameUIState.set 'fastForwardingSpeed', Math.max 3, 3 * (@world.maxTotalFrames * @world.dt) / 60
+    else if @realTime
+      buffer = if @world.indefiniteLength then 0 else @world.realTimeBufferMax
+      lag = (@world.frames.length - 1) * @world.dt - @world.age
+      intendedLag = @world.dt + buffer
+      if lag > intendedLag * 1.2
+        @fastForwardingToFrame = @world.frames.length - buffer * @world.frameRate
+        @gameUIState.set 'fastForwardingSpeed', lag / intendedLag
+      else
+        @fastForwardingToFrame = null
+        @gameUIState.set 'fastForwardingSpeed', null
+    #console.log "on new world, lag", lag, "intended lag", intendedLag, "fastForwardingToFrame", @fastForwardingToFrame, "speed", @gameUIState.get('fastForwardingSpeed'), "cause we are at", @world.age, "of", @world.frames.length * @world.dt
     if event.finished
       @updatePaths()
     else
@@ -474,26 +581,51 @@ module.exports = Surface = class Surface extends CocoClass
 
   onMouseMove: (e) =>
     @mouseScreenPos = {x: e.stageX, y: e.stageY}
+    createjs.lastMouseWorldPos = @camera.screenToWorld x: e.stageX, y: e.stageY
     return if @disabled
     Backbone.Mediator.publish 'surface:mouse-moved', x: e.stageX, y: e.stageY
+    @gameUIState.trigger('surface:stage-mouse-move', { originalEvent: e })
 
   onMouseDown: (e) =>
     return if @disabled
     cap = @camera.screenToCanvas({x: e.stageX, y: e.stageY})
-    # getObject(s)UnderPoint is broken, so we have to use the private method to get what we want
-    onBackground = not @webGLStage._getObjectsUnderPoint(e.stageX, e.stageY, null, true)
-
     wop = @camera.screenToWorld x: e.stageX, y: e.stageY
-    event = onBackground: onBackground, x: e.stageX, y: e.stageY, originalEvent: e, worldPos: wop
+    event = { x: e.stageX, y: e.stageY, originalEvent: e, worldPos: wop }
+    createjs.lastMouseWorldPos = wop
+    if not @handleEvents
+      # getObject(s)UnderPoint is broken, so we have to use the private method to get what we want
+      # This is slow, so we only do it if we have to (for example, in the level editor.)
+      event.onBackground = not @webGLStage._getObjectsUnderPoint(e.stageX, e.stageY, null, true)
+
     Backbone.Mediator.publish 'surface:stage-mouse-down', event
     Backbone.Mediator.publish 'tome:focus-editor', {}
+    @gameUIState.trigger('surface:stage-mouse-down', event)
     @mouseIsDown = true
+
+  onSpriteMouseDown: (e) =>
+    return unless @realTime
+    @realTimeInputEvents.add({
+      type: 'mousedown'
+      pos: @camera.screenToWorld x: e.originalEvent.stageX, y: e.originalEvent.stageY
+      time: @world.dt * @world.frames.length
+      thangID: e.sprite.thang.id
+    })
+
+  onWorldMouseMove: (e) =>
+    return unless @realTime
+    @realTimeInputEvents.add({
+      type: 'mousemove'
+      pos: @camera.screenToWorld x: e.originalEvent.stageX, y: e.originalEvent.stageY
+      time: @world.dt * @world.frames.length
+    })
 
   onMouseUp: (e) =>
     return if @disabled
-    onBackground = not @webGLStage.hitTest e.stageX, e.stageY
-    Backbone.Mediator.publish 'surface:stage-mouse-up', onBackground: onBackground, x: e.stageX, y: e.stageY, originalEvent: e
+    createjs.lastMouseWorldPos = @camera.screenToWorld x: e.stageX, y: e.stageY
+    event = { x: e.stageX, y: e.stageY, originalEvent: e }
+    Backbone.Mediator.publish 'surface:stage-mouse-up', event
     Backbone.Mediator.publish 'tome:focus-editor', {}
+    @gameUIState.trigger('surface:stage-mouse-up', event)
     @mouseIsDown = false
 
   onMouseWheel: (e) =>
@@ -506,7 +638,16 @@ module.exports = Surface = class Surface extends CocoClass
       canvas: @webGLCanvas
     event.screenPos = @mouseScreenPos if @mouseScreenPos
     Backbone.Mediator.publish 'surface:mouse-scrolled', event unless @disabled
+    @gameUIState.trigger('surface:mouse-scrolled', event)
 
+
+  #- Keyboard callbacks
+
+  onKeyEvent: (e) =>
+    return unless @realTime
+    event = _.pick(e, 'type', 'keyCode', 'ctrlKey', 'metaKey', 'shiftKey')
+    event.time = @world.dt * @world.frames.length
+    @realTimeInputEvents.add(event)
 
   #- Canvas callbacks
 
@@ -515,26 +656,35 @@ module.exports = Surface = class Surface extends CocoClass
     oldWidth = parseInt @normalCanvas.attr('width'), 10
     oldHeight = parseInt @normalCanvas.attr('height'), 10
     aspectRatio = oldWidth / oldHeight
-    pageWidth = $('#page-container').width() - 17  # 17px nano scroll bar
+    pageWidth = $('#page-container').width()
     if application.isIPadApp
       newWidth = 1024
       newHeight = newWidth / aspectRatio
-    else if @realTime or @options.spectateGame
-      pageHeight = $('#page-container').height() - $('#control-bar-view').outerHeight() - $('#playback-view').outerHeight()
-      newWidth = Math.min pageWidth, pageHeight * aspectRatio
+    else if @options.resizeStrategy is 'wrapper-size'
+      aspectRatio = 924 / 589  # TODO: it's likely this should always be hard-coded even for other types, as canvas might have accrued rounding errors
+      canvasWrapperWidth = $('#canvas-wrapper').width()
+      availableHeight = window.innerHeight
+      availableHeight -= $('#control-bar-view').outerHeight() unless @cinematic or parseInt($('#control-bar-view').css('left'), 10) > 0
+      newWidth = Math.min(pageWidth, availableHeight * aspectRatio, canvasWrapperWidth)
       newHeight = newWidth / aspectRatio
-    else if $('#thangs-tab-view')
-      newWidth = $('#canvas-wrapper').width()
+    else if @realTime or @cinematic or @options.spectateGame
+      availableHeight = window.innerHeight - $('#playback-view').outerHeight()
+      if @realTime or @options.spectateGame
+        availableHeight -= $('#control-bar-view').outerHeight()
+      newWidth = Math.min pageWidth, availableHeight * aspectRatio
       newHeight = newWidth / aspectRatio
     else
-      newWidth = 0.55 * pageWidth
+      newWidth = $('#canvas-wrapper').width()
       newHeight = newWidth / aspectRatio
-    return unless newWidth > 0 and newHeight > 0
-    return if newWidth is oldWidth and newHeight is oldHeight and not @options.spectateGame
-    return if newWidth < 200 or newHeight < 200
+    return unless newWidth > 100 and newHeight > 100
+
     #scaleFactor = if application.isIPadApp then 2 else 1  # Retina
     scaleFactor = 1
-    @normalCanvas.add(@webGLCanvas).attr width: newWidth * scaleFactor, height: newHeight * scaleFactor
+    newWidth *= scaleFactor
+    newHeight *= scaleFactor
+
+    @normalCanvas.add(@webGLCanvas).attr width: newWidth, height: newHeight
+    @trigger 'resize', { width: newWidth, height: newHeight }
 
     # Cannot do this to the webGLStage because it does not use scaleX/Y.
     # Instead the LayerAdapter scales webGL-enabled layers.
@@ -558,11 +708,9 @@ module.exports = Surface = class Surface extends CocoClass
 
   #- Real-time playback
 
-  onRealTimePlaybackWaiting: (e) ->
-    @onRealTimePlaybackStarted e
-
   onRealTimePlaybackStarted: (e) ->
     return if @realTime
+    @realTimeInputEvents.reset()
     @realTime = true
     @onResize()
     @playing = false  # Will start when countdown is done.
@@ -576,29 +724,64 @@ module.exports = Surface = class Surface extends CocoClass
     @onResize()
     _.delay @onResize, resizeDelay + 100  # Do it again just to be double sure that we don't stay zoomed in due to timing problems.
     @normalCanvas.add(@webGLCanvas).removeClass 'flag-color-selected'
-    if @previousCameraZoom
-      @camera.zoomTo @camera.newTarget or @camera.target, @previousCameraZoom, 3000
+    if @handleEvents
+      if @previousCameraZoom
+        @camera.zoomTo @camera.newTarget or @camera.target, @previousCameraZoom, 3000
+
+  #- Cinematic playback
+  onCinematicPlaybackStarted: (e) ->
+    return if @cinematic
+    @cinematic = true
+    @onResize()
+
+  onCinematicPlaybackEnded: (e) ->
+    return unless @cinematic
+    @cinematic = false
+    @onResize()
+    _.delay @onResize, resizeDelay + 100  # Do it again just to be double sure that we don't stay zoomed in due to timing problems.
 
   onFlagColorSelected: (e) ->
     @normalCanvas.add(@webGLCanvas).toggleClass 'flag-color-selected', Boolean(e.color)
     e.pos = @camera.screenToWorld @mouseScreenPos if @mouseScreenPos
 
+  # Force sizing based on width for game-dev levels, so that the instructions panel doesn't obscure the game
+  onManualCast: ->
+    if @options.levelType is 'game-dev'
+      console.log "Force resize strategy"
+      @options.originalResizeStrategy = @options.resizeStrategy
+      @options.resizeStrategy = 'wrapper-size'
 
+  # Revert back to normal sizing when done playing a game-dev level
+  onStopRealTimePlayback: ->
+    if @options.levelType is 'game-dev'
+      console.log "Reset resize strategy"
+      @options.resizeStrategy = @options.originalResizeStrategy
 
   updatePaths: ->
-    return unless @options.paths and @heroLank
+    showPathFor = switch
+      when not @options.paths then []
+      when @world.showPathFor then @world.showPathFor
+      when utils.isCodeCombat then [@heroLank?.thang?.id]
+      else []
+    return unless showPathFor.length
     @hidePaths()
     return if @world.showPaths is 'never'
-    layerAdapter = @lankBoss.layerAdapters['Path']
-    @trailmaster ?= new TrailMaster @camera, layerAdapter
-    @paths = @trailmaster.generatePaths @world, @heroLank.thang
-    @paths.name = 'paths'
-    layerAdapter.addChild @paths
+    @trailmaster ?= new TrailMaster @camera, @pathLayerAdapter, @options.level
+    @trailmaster.cleanUp()
+    @paths = []
+    for thangID in showPathFor
+      lank = @lankBoss.lankFor thangID
+      continue if not lank
+      path = @trailmaster.generatePaths @world, lank.thang
+      continue if not path
+      path.name = 'paths'
+      @pathLayerAdapter.addChild path
+      @paths.push(path)
 
   hidePaths: ->
-    return if not @paths
-    if @paths.parent
-      @paths.parent.removeChild @paths
+    return if not @paths?.length
+    for path in @paths when path.parent
+      path.parent.removeChild path
     @paths = null
 
 
@@ -629,8 +812,9 @@ module.exports = Surface = class Surface extends CocoClass
     if @showingPathFinding then @showPathFinding() else @hidePathFinding()
 
   hidePathFinding: ->
-    @surfaceLayer.removeChild @navRectangles if @navRectangles
-    @surfaceLayer.removeChild @navPaths if @navPaths
+    surfaceLayer = @gridLayer
+    surfaceLayer.removeChild @navRectangles if @navRectangles
+    surfaceLayer.removeChild @navPaths if @navPaths
     @navRectangles = @navPaths = null
 
   showPathFinding: ->
@@ -638,19 +822,18 @@ module.exports = Surface = class Surface extends CocoClass
 
     mesh = _.values(@world.navMeshes or {})[0]
     return unless mesh
-    @navRectangles = new createjs.Container()
-    @navRectangles.layerPriority = -1
+    surfaceLayer = @gridLayer
+    @navRectangles = new createjs.Container(surfaceLayer.spriteSheet)
     @addMeshRectanglesToContainer mesh, @navRectangles
-    @surfaceLayer.addChild @navRectangles
-    @surfaceLayer.updateLayerOrder()
+    surfaceLayer.addChild @navRectangles
+    surfaceLayer.updateLayerOrder()
 
     graph = _.values(@world.graphs or {})[0]
-    return @surfaceLayer.updateLayerOrder() unless graph
-    @navPaths = new createjs.Container()
-    @navPaths.layerPriority = -1
+    return surfaceLayer.updateLayerOrder() unless graph
+    @navPaths = new createjs.Container(surfaceLayer.spriteSheet)
     @addNavPathsToContainer graph, @navPaths
-    @surfaceLayer.addChild @navPaths
-    @surfaceLayer.updateLayerOrder()
+    surfaceLayer.addChild @navPaths
+    surfaceLayer.updateLayerOrder()
 
   addMeshRectanglesToContainer: (mesh, container) ->
     for rect in mesh
@@ -675,10 +858,12 @@ module.exports = Surface = class Surface extends CocoClass
     v2 = @camera.worldToSurface v2
     shape.graphics
     .setStrokeStyle(1)
-    .moveTo(v1.x, v1.y)
     .beginStroke('rgba(128,0,0,0.4)')
-    .lineTo(v2.x, v2.y)
+    .moveTo(0, 0)
+    .lineTo(v2.x - v1.x, v2.y - v1.y)
     .endStroke()
+    shape.x = v1.x
+    shape.y = v1.y
     container.addChild shape
 
 
@@ -689,13 +874,13 @@ module.exports = Surface = class Surface extends CocoClass
     @camera?.destroy()
     createjs.Ticker.removeEventListener('tick', @tick)
     createjs.Sound.stop()
+    store.dispatch('audio/fadeAndStopAll', { to: 0, duration: 1000, unload: true }) if utils.isOzaria
     layer.destroy() for layer in @normalLayers
     @lankBoss.destroy()
     @chooser?.destroy()
     @dimmer?.destroy()
     @countdownScreen?.destroy()
     @playbackOverScreen?.destroy()
-    @waitingScreen?.destroy()
     @coordinateDisplay?.destroy()
     @coordinateGrid?.destroy()
     @normalStage.clear()
@@ -707,12 +892,19 @@ module.exports = Surface = class Surface extends CocoClass
     @webGLStage.removeEventListener 'stagemousemove', @onMouseMove
     @webGLStage.removeEventListener 'stagemousedown', @onMouseDown
     @webGLStage.removeEventListener 'stagemouseup', @onMouseUp
+    @normalStage.removeAllEventListeners()
     @webGLStage.removeAllEventListeners()
     @normalStage.enableDOMEvents false
     @webGLStage.enableDOMEvents false
+    @normalStage.enableMouseOver 0
     @webGLStage.enableMouseOver 0
     @webGLCanvas.off 'mousewheel', @onMouseWheel
+    @normalCanvas[0].width = @normalCanvas[0].height = 0
+    @webGLCanvas[0].width = @webGLCanvas[0].height = 0
     $(window).off 'resize', @onResize
+    $(window).off('keydown', @onKeyEvent)
+    $(window).off('keyup', @onKeyEvent)
     clearTimeout @surfacePauseTimeout if @surfacePauseTimeout
     clearTimeout @surfaceZoomPauseTimeout if @surfaceZoomPauseTimeout
+    clearTimeout @initFrameRateTimeout if @initFrameRateTimeout
     super()

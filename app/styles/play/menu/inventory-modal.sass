@@ -28,7 +28,11 @@ $itemSlotGridHeight: 51px
 
   +user-select(none)
 
-  
+  @media only screen and (max-height: 728px)
+    .modal-content
+      top: -55px
+
+
   //- Background
 
   #play-items-modal-narrow-bg
@@ -147,20 +151,6 @@ $itemSlotGridHeight: 51px
         position: absolute
         top: 10px
         left: 10px
-
-      &[data-slot="misc-1"]
-        display: none // hiding for now
-        left: 10px + ($itemSlotGridWidth * 0)
-        top: 15px + ($itemSlotGridHeight * 3)
-        .placeholder
-          background-position: (-0 * $itemSlotInnerWidth) 0px
-  
-      &[data-slot="misc-0"]
-        display: none // hiding for now
-        left: 10px + ($itemSlotGridWidth * 0)
-        top: 15px + ($itemSlotGridHeight * 2)
-        .placeholder
-          background-position: (-4 * $itemSlotInnerWidth) 0px
 
       &[data-slot="minion"]
         left: 10px + ($itemSlotGridWidth * 5)
@@ -346,14 +336,11 @@ $itemSlotGridHeight: 51px
         cursor: pointer
 
         &:hover
-          padding: 0
-          img
-            margin: 1px
           button
             //margin-top: -2px
             //height: 19px
-            font-size: 12px
-            margin: -1px 1px 1px 1px
+            position: relative
+            top: -1px
 
             &:active, &.active
               background-position: -57px * 2 0
@@ -447,6 +434,9 @@ $itemSlotGridHeight: 51px
     
   #choose-hero-button
     left: 20px
+    width: 254px
+    background-size: 254px 55px
+    padding-left: 14px
     
   #play-level-button
     right: 414px
@@ -494,6 +484,27 @@ $itemSlotGridHeight: 51px
       background: rgb(84,128,44)
       color: white
 
+    #subscriber-item-viewed
+      flex-grow: 1
+      height: 55px
+      line-height: 10px
+      border-style: solid
+      border-image: url(/images/common/button-background-primary-active.png) 14 20 20 20 fill round
+      border-width: 14px 20px 20px 20px
+      color: darken(white, 5%)
+      background-color: black
+
+      span
+        pointer-events: none
+
+      &:hover
+        border-image: url(/images/common/button-background-primary-disabled.png) 14 20 20 20 fill round
+
+      &:active
+        border-image: url(/images/common/button-background-primary-pressed.png) 14 20 20 20 fill round
+        padding: 2px 0 0 2px
+        color: white
+
   //- Paper doll positioning
 
   #hero-image, #hero-image-head, #hero-image-hair, #hero-image-thumb
@@ -515,6 +526,10 @@ $itemSlotGridHeight: 51px
       &.Ranger
         left: -16px
 
+      &.armando-hoyos
+        left: 74px
+        bottom: 40px
+
   #hero-image-head
     z-index: 16
   #hero-image-hair
@@ -531,6 +546,10 @@ $itemSlotGridHeight: 51px
       @include rotate(-15deg)
       left: 53px
       bottom: 54px
+
+      &.armando-hoyos
+        left: 49px
+        bottom: 66px
 
   .doll-image
     position: absolute
@@ -603,12 +622,17 @@ $itemSlotGridHeight: 51px
     &.head
       z-index: 17
 
-    &.Ranger:not(.feet)
+    &.Ranger:not(.feet):not(.pet)
       &.female
         left: -7px
 
       &.male
         left: -16px
+
+    &.pet
+      z-index: 18
+      left: 15%
+      bottom: 5%
 
 body[lang='ja'], body[lang^='zh'], body[lang='ca'], body[lang^='es'], body[lang^='pt'], body[lang='ro'], body[lang='fi'], body[lang='sv'], body[lang='uk'], body[lang='vi'], body[lang='cz']
   #inventory-modal #unequipped .item button

@@ -1,6 +1,7 @@
+require('app/styles/play/level/hud.sass')
 CocoView = require 'views/core/CocoView'
-template = require 'templates/play/level/hud'
-prop_template = require 'templates/play/level/hud_prop'
+template = require 'app/templates/play/level/hud'
+prop_template = require 'app/templates/play/level/hud_prop'
 utils = require 'core/utils'
 
 module.exports = class LevelHUDView extends CocoView
@@ -78,6 +79,7 @@ module.exports = class LevelHUDView extends CocoView
     options.colorConfig = colorConfig if colorConfig
     wrapper = @$el.find '.thang-canvas-wrapper'
     team = @thang?.team
+    wrapper.removeClass 'hide'
     wrapper.removeClass (i, css) -> (css.match(/\bteam-\S+/g) or []).join ' '
     wrapper.addClass "team-#{team}"
     if thangType.get('raster')
@@ -100,8 +102,10 @@ module.exports = class LevelHUDView extends CocoView
     @stage?.stopTalking()
 
   createProperties: ->
-    if @thang.id in ['Hero Placeholder', 'Hero Placeholder 1']
-      name = {knight: 'Tharin', captain: 'Anya', librarian: 'Hushbaum', sorcerer: 'Pender', 'potion-master': 'Omarn', samurai: 'Hattori', ninja: 'Amara', raider: 'Arryn', goliath: 'Okar', guardian: 'Illia', pixie: 'Zana', assassin: 'Ritic', necromancer: 'Nalfar', 'dark-wizard': 'Usara'}[@thang.type] ? 'Hero'
+    if @options.level.isType('game-dev')
+      name = 'Game'  # TODO: we don't need the HUD at all
+    else if @thang.id in ['Hero Placeholder', 'Hero Placeholder 1']
+      name = @thangType?.getHeroShortName() or 'Hero'
     else
       name = @thang.hudName or (if @thang.type then "#{@thang.id} - #{@thang.type}" else @thang.id)
     utils.replaceText @$el.find('.thang-name'), name

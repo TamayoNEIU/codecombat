@@ -1,18 +1,14 @@
 CocoClass = require 'core/CocoClass'
 cache = {}
 {me} = require 'core/auth'
+createjs = require 'lib/createjs-parts'
 
 # Top 20 obscene words (plus 'fiddlesticks') will trigger swearing Simlish with *beeps*.
 # Didn't like leaving so much profanity lying around in the source, so rot13'd.
 rot13 = (s) -> s.replace /[A-z]/g, (c) -> String.fromCharCode c.charCodeAt(0) + (if c.toUpperCase() <= 'M' then 13 else -13)
 swears = (rot13 s for s in ['nefrubyr', 'nffubyr', 'onfgneq', 'ovgpu', 'oybbql', 'obyybpxf', 'ohttre', 'pbpx', 'penc', 'phag', 'qnza', 'qnea', 'qvpx', 'qbhpur', 'snt', 'shpx', 'cvff', 'chffl', 'fuvg', 'fyhg', 'svqqyrfgvpxf'])
 
-# IE(11, 10, 9) throws an exception if createjs.FlashPlugin is undefined
-# Chrome and Firefox don't seem to care that it's undefined
-if createjs.FlashPlugin?
-  soundPlugins = [createjs.WebAudioPlugin, createjs.FlashPlugin, createjs.HTMLAudioPlugin]
-else
-  soundPlugins = [createjs.WebAudioPlugin, createjs.HTMLAudioPlugin]
+soundPlugins = [createjs.WebAudioPlugin, createjs.HTMLAudioPlugin]
 createjs.Sound.registerPlugins(soundPlugins)
 
 class Manifest
@@ -39,11 +35,11 @@ class Media
 
 class AudioPlayer extends CocoClass
   subscriptions:
-    'audio-player:play-sound': (e) -> @playInterfaceSound e.trigger, e.volume
+    'audio-player:play-sound': (e) -> @playInterfaceSound e.trigger, e.volume, e.delay, e.pos, e.pan
 
   constructor: () ->
     super()
-    @ext = if createjs.Sound.getCapability('mp3') then '.mp3' else '.ogg'
+    @ext = if createjs.Sound.capabilities.mp3 then '.mp3' else '.ogg'
     @camera = null
     @listenToSound()
     @createNewManifest()
@@ -86,6 +82,8 @@ class AudioPlayer extends CocoClass
       return sound if sound = say['repeating-loop']
     if /move(up|down|left|right)/.test message
       return sound if sound = say["move-#{message[4...]}"]
+    if message is 'cleave'
+      return sound if sound = say["take-that"]
     defaults = say.defaultSimlish
     if say.swearingSimlish?.length and _.find(swears, (s) -> message.search(s) isnt -1)
       defaults = say.swearingSimlish
@@ -98,16 +96,16 @@ class AudioPlayer extends CocoClass
       filename = "/file/interface/#{name}#{@ext}"
       @preloadSound filename, name
 
-  playInterfaceSound: (name, volume=1) ->
+  playInterfaceSound: (name, volume=1, delay=0, pos=null, pan=0) ->
     return unless volume and me.get 'volume'
     filename = "/file/interface/#{name}#{@ext}"
     if @hasLoadedSound filename
-      @playSound name, volume
+      @playSound name, volume, delay, pos, pan
     else
       @preloadInterfaceSounds [name] unless filename of cache
       @soundsToPlayWhenLoaded[name] = volume
 
-  playSound: (name, volume=1, delay=0, pos=null) ->
+  playSound: (name, volume=1, delay=0, pos=null, pan=0) ->
     return console.error 'Trying to play empty sound?' unless name
     return unless volume and me.get 'volume'
     audioOptions = {volume: volume, delay: delay}
@@ -115,6 +113,7 @@ class AudioPlayer extends CocoClass
     unless @hasLoadedSound filename
       @soundsToPlayWhenLoaded[name] = audioOptions.volume
     audioOptions = @applyPanning audioOptions, pos if @camera and not @camera.destroyed and pos
+    audioOptions.pan ||= pan
     instance = createjs.Sound.play name, audioOptions
     instance
 
@@ -133,12 +132,12 @@ class AudioPlayer extends CocoClass
   nameForSoundReference: (sound) ->
     sound[@ext.slice(1)]  # mp3 or ogg
 
-  preloadSound: (filename, name) ->
+  preloadSound: (filename, name, channels=1) ->
     return unless filename
     return if filename of cache
     name ?= filename
     # SoundJS flips out if you try to register the same file twice
-    result = createjs.Sound.registerSound(filename, name, 1)  # 1: 1 channel
+    result = createjs.Sound.registerSound(filename, name, channels)
     cache[filename] = new Media(name)
 
   # PROGRESS CALLBACKS
@@ -153,7 +152,7 @@ class AudioPlayer extends CocoClass
       @soundsToPlayWhenLoaded[media.name] = false
     @notifyProgressChanged()
 
-  onSoundLoadError: (e) =>
+  onSoundLoadError: (e) ->
     console.error 'Could not load sound', e
 
   notifyProgressChanged: ->

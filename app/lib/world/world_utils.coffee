@@ -57,6 +57,7 @@ module.exports.clone = clone = (obj, skipThangs=false) ->
   newInstance
 
 # Walk a key chain down to the value. Can optionally set newValue instead.
+# Same as in core utils, but don't want mutual imports
 module.exports.downTheChain = downTheChain = (obj, keyChain, newValue=undefined) ->
   return null unless obj
   return obj[keyChain] unless _.isArray keyChain
@@ -72,8 +73,13 @@ module.exports.downTheChain = downTheChain = (obj, keyChain, newValue=undefined)
 module.exports.now = (if window?.performance?.now? then (-> window.performance.now()) else (-> new Date()))
 
 module.exports.consolidateThangs = consolidateThangs = (thangs) ->
+  # We can gain a performance increase by consolidating all regular walls into a minimal covering, non-intersecting set a la Gridmancer.
   debug = false
-  isStructural = (t) -> t.stateless and t.collides and t.collisionCategory is 'obstacles' and t.shape in ['box', 'sheet'] and t.restitution is 1.5 and (t.pos.x - t.width / 2 >= 0) and (t.pos.y - t.height / 2 >= 0)
+  isStructural = (t) ->
+    t.stateless and t.collides and t.collisionCategory is 'obstacles' and t.shape in ['box', 'sheet'] and  # Can only do wall-like obstacle Thangs.
+    t.spriteName isnt 'Ice Wall' and t.restitution is 1.0 and  # Fixed restitution value on 2016-03-15, but it causes discrepancies, so disabled for Kelvintaph levels.
+    /Wall/.test(t.spriteName) and  # Not useful to do Thangs that aren't actually walls because they're usually not on a grid
+    (t.pos.x - t.width / 2 >= 0) and (t.pos.y - t.height / 2 >= 0)  # Grid doesn't handle negative numbers, so don't coalesce walls below/left of 0, 0.
   structural = _.remove thangs, isStructural
   return unless structural.length
   rightmost = _.max structural, (t) -> t.pos.x + t.width / 2
@@ -101,13 +107,15 @@ module.exports.consolidateThangs = consolidateThangs = (thangs) ->
     thang.pos.y = rect.y
     thang.width = rect.width
     thang.height = rect.height
+    thang.destroyBody()
     thang.createBodyDef()
+    thang.createBody()
     dissection.push thang
 
   dissectRectangles grid, addStructuralThang, false, debug
 
   # Now add the new structural thangs back to thangs and return the ones not in the dissection.
-  console.log 'Turned', structural.length, 'structural Thangs into', dissection.length, 'dissecting Thangs.'
+  #console.log 'Turned', structural.length, 'structural Thangs into', dissection.length, 'dissecting Thangs.'
   thangs.push dissection...
   structural[dissection.length ... structural.length]
 

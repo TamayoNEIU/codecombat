@@ -11,7 +11,6 @@ module.exports = class LankBoss extends CocoClass
   subscriptions:
     'level:set-debug': 'onSetDebug'
     'sprite:highlight-sprites': 'onHighlightSprites'
-    'surface:stage-mouse-down': 'onStageMouseDown'
     'level:select-sprite': 'onSelectSprite'
     'level:suppress-selection-sounds': 'onSuppressSelectionSounds'
     'level:lock-select': 'onSetLockSelect'
@@ -19,16 +18,18 @@ module.exports = class LankBoss extends CocoClass
     'god:new-world-created': 'onNewWorld'
     'god:streaming-world-updated': 'onNewWorld'
     'camera:dragged': 'onCameraDragged'
+    'camera:zoom-updated': 'onCameraZoomUpdated'
     'sprite:loaded': -> @update(true)
     'level:flag-color-selected': 'onFlagColorSelected'
     'level:flag-updated': 'onFlagUpdated'
     'surface:flag-appeared': 'onFlagAppeared'
     'surface:remove-selected-flag': 'onRemoveSelectedFlag'
 
-  constructor: (@options) ->
+  constructor: (@options={}) ->
     super()
+    @handleEvents = @options.handleEvents
+    @gameUIState = @options.gameUIState
     @dragged = 0
-    @options ?= {}
     @camera = @options.camera
     @webGLStage = @options.webGLStage
     @surfaceTextLayer = @options.surfaceTextLayer
@@ -38,11 +39,14 @@ module.exports = class LankBoss extends CocoClass
     @lankArray = []  # Mirror @lanks, but faster for when we just need to iterate
     @createLayers()
     @pendingFlags = []
+    if not @handleEvents
+      @listenTo @gameUIState, 'change:selected', @onChangeSelected
 
   destroy: ->
     @removeLank lank for thangID, lank of @lanks
-    @targetMark?.destroy()
-    @selectionMark?.destroy()
+    if utils.isCodeCombat
+      @targetMark?.destroy()
+      @selectionMark?.destroy()
     lankLayer.destroy() for lankLayer in _.values @layerAdapters
     super()
 
@@ -82,18 +86,28 @@ module.exports = class LankBoss extends CocoClass
     console.error 'Lank collision! Already have:', id if @lanks[id]
     @lanks[id] = lank
     @lankArray.push lank
-    layer ?= @layerAdapters['Obstacle'] if lank.thang?.spriteName.search(/(dungeon|indoor|ice|classroom|vr).wall/i) isnt -1
+    layer ?= @layerAdapters['Obstacle'] if lank.thang?.spriteName.search(/(dungeon|indoor|ice|classroom|vr|junior).wall/i) isnt -1
     layer ?= @layerForChild lank.sprite, lank
     layer.addLank lank
     layer.updateLayerOrder()
     lank
 
   createMarks: ->
-    @targetMark = new Mark name: 'target', camera: @camera, layer: @layerAdapters['Ground'], thangType: 'target'
+    if @world.showTargetMark
+      @targetMark = new Mark name: 'target', camera: @camera, layer: @layerAdapters['Ground'], thangType: 'target'
     @selectionMark = new Mark name: 'selection', camera: @camera, layer: @layerAdapters['Ground'], thangType: 'selection'
 
   createLankOptions: (options) ->
-    _.extend options, camera: @camera, resolutionFactor: SPRITE_RESOLUTION_FACTOR, groundLayer: @layerAdapters['Ground'], textLayer: @surfaceTextLayer, floatingLayer: @layerAdapters['Floating'], showInvisible: @options.showInvisible
+    _.extend options, {
+      @camera
+      resolutionFactor: SPRITE_RESOLUTION_FACTOR
+      groundLayer: @layerAdapters['Ground']
+      textLayer: @surfaceTextLayer
+      floatingLayer: @layerAdapters['Floating']
+      showInvisible: @options.showInvisible
+      @gameUIState
+      @handleEvents
+    }
 
   onSetDebug: (e) ->
     return if e.debug is @debug
@@ -130,7 +144,6 @@ module.exports = class LankBoss extends CocoClass
     @lankArray.splice @lankArray.indexOf(lank), 1
     @stopListening lank
     lank.destroy()
-    lank.thang = thang  # Keep around so that we know which thang the destroyed thang was for
 
   updateSounds: ->
     lank.playSounds() for lank in @lankArray  # hmm; doesn't work for lanks which we didn't add yet in adjustLankExistence
@@ -138,7 +151,8 @@ module.exports = class LankBoss extends CocoClass
   update: (frameChanged) ->
     @adjustLankExistence() if frameChanged
     lank.update frameChanged for lank in @lankArray
-    @updateSelection()
+    if utils.isCodeCombat
+      @updateSelection()
     @layerAdapters['Default'].updateLayerOrder()
     @cacheObstacles()
 
@@ -150,8 +164,10 @@ module.exports = class LankBoss extends CocoClass
       itemsJustEquipped = itemsJustEquipped.concat @equipNewItems thang if thang.equip
       if lank = @lanks[thang.id]
         lank.setThang thang  # make sure Lank has latest Thang
+        thang.stateChanged = true if @world.synchronous and not thang.stateless  # TODO: think of a more performant thing to do
       else
         lank = @addThangToLanks(thang)
+        thang.stateChanged = true if @world.synchronous and not thang.stateless
         Backbone.Mediator.publish 'surface:new-thang-added', thang: thang, sprite: lank
         updatedObstacles.push lank if lank.sprite.parent is @layerAdapters['Obstacle']
         lank.playSounds()
@@ -171,20 +187,46 @@ module.exports = class LankBoss extends CocoClass
     @updateScreenReader()
 
   updateScreenReader: ->
+    if utils.isOzaria
+      @updateScreenReaderOzaria();
+    else
+      @updateScreenReaderCodeCombat()
+
+  updateScreenReaderCodeCombat: ->
     # Testing ASCII map for screen readers
     return unless me.get('name') is 'zersiax'  #in ['zersiax', 'Nick']
     ascii = $('#ascii-surface')
     thangs = (lank.thang for lank in @lankArray)
-    grid = new Grid thangs, @world.width, @world.height, 0, 0, 0, true
-    utils.replaceText ascii, grid.toString true
-    ascii.css 'transform', 'initial'
-    fullWidth = ascii.innerWidth()
-    fullHeight = ascii.innerHeight()
-    availableWidth = ascii.parent().innerWidth()
-    availableHeight = ascii.parent().innerHeight()
-    scale = availableWidth / fullWidth
-    scale = Math.min scale, availableHeight / fullHeight
-    ascii.css 'transform', "scale(#{scale})"
+    bounds = @world.calculateSimpleMovementBounds()
+    width = Math.min bounds.right - bounds.left, Math.round(@camera.worldViewport.width)
+    height = Math.min bounds.top - bounds.bottom, Math.round(@camera.worldViewport.height)
+    left = Math.max bounds.left, Math.round(@camera.worldViewport.x)
+    bottom = Math.max bounds.bottom, Math.round(@camera.worldViewport.y - @camera.worldViewport.height)  # y is inverted
+    simpleMovementResolution = 10  # It's always 10 in Ozaria
+    padding = 0
+    rogue = true
+    simpleMovementGrid = new Grid thangs, width, height, padding, left, bottom, rogue, simpleMovementResolution
+    Backbone.Mediator.publish 'surface:update-screen-reader-map', grid: simpleMovementGrid
+
+  updateScreenReaderOzaria: ->
+    return unless me.get('aceConfig')?.screenReaderMode and utils.isOzaria
+    wv = @camera.worldViewport
+    thangs = (lank.thang for lank in @lankArray when (
+      (wv.x             <= lank.thang.pos?.x <= wv.x + wv.width) and
+        (wv.y - wv.height <= lank.thang.pos?.y <= wv.y)
+    )
+    )  # Ignore off-screen Thangs
+    bounds = @world.calculateSimpleMovementBounds thangs
+    width = Math.min bounds.right - bounds.left, Math.round(wv.width)
+    height = Math.min bounds.top - bounds.bottom, Math.round(wv.height)
+    left = Math.max bounds.left, Math.round(wv.x)
+    bottom = Math.max bounds.bottom, Math.round(wv.y - wv.height)  # y is inverted
+    simpleMovementResolution = 10  # It's always 10 in Ozaria
+    padding = 0
+    rogue = true
+    simpleMovementGrid = new Grid thangs, width, height, padding, left, bottom, rogue, simpleMovementResolution
+    bounds = {left, bottom, width, height}
+    Backbone.Mediator.publish 'surface:update-screen-reader-map', grid: simpleMovementGrid, bounds: bounds
 
   equipNewItems: (thang) ->
     itemsJustEquipped = []
@@ -203,8 +245,7 @@ module.exports = class LankBoss extends CocoClass
 
   cacheObstacles: (updatedObstacles=null) ->
     return if @cachedObstacles and not updatedObstacles
-    lankArray = @lankArray
-    wallLanks = (lank for lank in lankArray when lank.thangType?.get('name').search(/(dungeon|indoor|ice|classroom|vr).wall/i) isnt -1)
+    wallLanks = (lank for lank in @lankArray when lank.thangType?.get('name').search(/(dungeon|indoor|ice|classroom|vr|junior).wall/i) isnt -1)
     return if _.any (s.stillLoading for s in wallLanks)
     walls = (lank.thang for lank in wallLanks)
     @world.calculateBounds()
@@ -213,7 +254,7 @@ module.exports = class LankBoss extends CocoClass
       possiblyUpdatedWallLanks = (lank for lank in wallLanks when _.find updatedObstacles, (w2) -> lank is w2 or (Math.abs(lank.thang.pos.x - w2.thang.pos.x) + Math.abs(lank.thang.pos.y - w2.thang.pos.y)) <= 16)
     else
       possiblyUpdatedWallLanks = wallLanks
-#    console.log 'updating up to', possiblyUpdatedWallLanks.length, 'of', wallLanks.length, 'wall lanks from updatedObstacles', updatedObstacles
+    # console.log 'updating up to', possiblyUpdatedWallLanks.length, 'of', wallLanks.length, 'wall lanks from updatedObstacles', updatedObstacles
     for wallLank in possiblyUpdatedWallLanks
       wallLank.queueAction 'idle' if not wallLank.currentRootAction
       wallLank.lockAction(false)
@@ -221,25 +262,41 @@ module.exports = class LankBoss extends CocoClass
       wallLank.lockAction(true)
       wallLank.updateScale()
       wallLank.updatePosition()
-#    console.log wallGrid.toString()
+    # console.log wallGrid.toString()
     @cachedObstacles = true
+
+  migrateJunior: ->
+    # This helps convert old-style Junior levels to new beach tiles
+    walls = (lank.thang for lank in @lankArray when lank.thangType?.get('name').search(/indoor wall/i) isnt -1)
+    wallGrid = new Grid walls, @world.width, @world.height, 0, 0, 0, false, 4
+    newThangs = []
+    for x in [-2 .. @world.width + 6] by 8
+      for y in [-2 .. @world.height + 6] by 8
+        if x < 0 or x > @world.width or y < 0 or y > @world.height or wallGrid.contents(x, y, 4, 4).length
+          newThangs.push spriteName: 'Junior Wall', pos: {x, y}
+        else
+          newThangs.push spriteName: 'Junior Beach Floor', pos: {x, y}
+    newThangs.push spriteName: 'Junior Ocean Background', pos: {x: 40, y: 32}
+    return newThangs
 
   lankFor: (thangID) -> @lanks[thangID]
 
   onNewWorld: (e) ->
     @world = @options.world = e.world
     # Clear obstacle cache for this level, since we are spawning walls dynamically
-    @cachedObstacles = false if e.finished and /kithgard-mastery/.test window.location.href
+    @cachedObstacles = false if e.finished and /(kithgard-mastery|dungeon-raider)/.test window.location.href
 
   play: ->
     lank.play() for lank in @lankArray
-    @selectionMark?.play()
-    @targetMark?.play()
+    if utils.isCodeCombat
+      @selectionMark?.play()
+      @targetMark?.play()
 
   stop: ->
     lank.stop() for lank in @lankArray
-    @selectionMark?.stop()
-    @targetMark?.stop()
+    if utils.isCodeCombat
+      @selectionMark?.stop()
+      @targetMark?.stop()
 
   # Selection
 
@@ -255,7 +312,11 @@ module.exports = class LankBoss extends CocoClass
   onCameraDragged: ->
     @dragged += 1
 
+  onCameraZoomUpdated: (e) ->
+    @updateScreenReader()
+
   onLankMouseUp: (e) ->
+    return unless @handleEvents
     return if key.shift #and @options.choosing
     return @dragged = 0 if @dragged > 3
     @dragged = 0
@@ -263,9 +324,22 @@ module.exports = class LankBoss extends CocoClass
     return if @flagCursorLank and lank?.thangType.get('name') is 'Flag'
     @selectLank e, lank
 
-  onStageMouseDown: (e) ->
-    return if key.shift #and @options.choosing
-    @selectLank e if e.onBackground
+  onChangeSelected: (gameUIState, selected) ->
+    oldLanks = (s.sprite for s in gameUIState.previousAttributes().selected or [])
+    newLanks = (s.sprite for s in selected or [])
+    addedLanks = _.difference(newLanks, oldLanks)
+    removedLanks = _.difference(oldLanks, newLanks)
+
+    for lank in addedLanks
+      layer = if lank.sprite.parent isnt @layerAdapters.Default.container then @layerAdapters.Default else @layerAdapters.Ground
+      mark = new Mark name: 'selection', camera: @camera, layer: layer, thangType: 'selection'
+      mark.toggle true
+      mark.setLank(lank)
+      mark.update()
+      lank.marks.selection = mark # TODO: Figure out how to non-hackily assign lank this mark
+
+    for lank in removedLanks
+      lank.removeMark?('selection')
 
   selectThang: (thangID, spellName=null, treemaThangSelected = null) ->
     return @willSelectThang = [thangID, spellName] unless @lanks[thangID]
@@ -275,8 +349,9 @@ module.exports = class LankBoss extends CocoClass
     return if e and (@disabled or @selectLocked)  # Ignore clicks for selection/panning/wizard movement while disabled or select is locked
     worldPos = lank?.thang?.pos
     worldPos ?= @camera.screenToWorld {x: e.originalEvent.rawX, y: e.originalEvent.rawY} if e?.originalEvent
-    if (not @reallyStopMoving) and worldPos and (@options.navigateToSelection or not lank or treemaThangSelected) and e?.originalEvent?.nativeEvent?.which isnt 3
-      @camera.zoomTo(lank?.sprite or @camera.worldToSurface(worldPos), @camera.zoom, 1000, true)
+    if @handleEvents
+      if (not @reallyStopMoving) and worldPos and (@options.navigateToSelection or not lank or treemaThangSelected) and e?.originalEvent?.nativeEvent?.which isnt 3
+        @camera.zoomTo(lank?.sprite or @camera.worldToSurface(worldPos), @camera.zoom, 1000, true)
     lank = null if @options.choosing  # Don't select lanks while choosing
     if lank isnt @selectedLank
       @selectedLank?.selected = false
